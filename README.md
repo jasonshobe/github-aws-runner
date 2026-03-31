@@ -59,6 +59,8 @@ The personal access token stored in SSM must have:
 
 All configuration is stored in AWS Systems Manager Parameter Store. You must create these parameters in your target account and region before deploying.
 
+The `/github-aws-runner` prefix used in all parameter names is the default. It can be changed by setting the `ssmPrefix` CDK context variable (see [Deployment](#deployment)).
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `/github-aws-runner/github-token` | SecureString | GitHub personal access token |
@@ -166,6 +168,12 @@ aws ssm put-parameter \
 
    ```bash
    cdk deploy
+   ```
+
+   To use a custom SSM parameter prefix instead of `/github-aws-runner`, pass the `ssmPrefix` context variable. All SSM parameters must be created under the same prefix.
+
+   ```bash
+   cdk deploy --context ssmPrefix=/my-runner
    ```
 
    The stack will:

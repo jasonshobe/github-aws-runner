@@ -12,20 +12,6 @@ import * as cr from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 import * as path from "path";
 
-const SSM_GITHUB_TOKEN = "/github-aws-runner/github-token";
-const SSM_WEBHOOK_SECRET = "/github-aws-runner/webhook-secret";
-const SSM_TARGET_TYPE = "/github-aws-runner/target-type";
-const SSM_TARGET_SLUG = "/github-aws-runner/target-slug";
-const SSM_RUNNER_TIMEOUT = "/github-aws-runner/runner-timeout-minutes";
-const SSM_INSTANCE_TYPE = "/github-aws-runner/instance-type";
-const SSM_EBS_VOLUME_SIZE = "/github-aws-runner/ebs-volume-size-gb";
-const SSM_MAX_CONCURRENT_RUNNERS = "/github-aws-runner/max-concurrent-runners";
-const SSM_API_THROTTLE_RATE = "/github-aws-runner/api-throttle-rate-limit";
-const SSM_API_THROTTLE_BURST = "/github-aws-runner/api-throttle-burst-limit";
-const SSM_RUNNER_LABEL = "/github-aws-runner/runner-label";
-const SSM_ALLOWED_INSTANCE_TYPES = "/github-aws-runner/allowed-instance-types";
-const SSM_MAX_EBS_VOLUME_SIZE = "/github-aws-runner/max-ebs-volume-size-gb";
-
 export interface GithubAwsRunnerProps extends cdk.StackProps {
   /** GitHub webhook source CIDR blocks (from /meta API) used for initial resource policy */
   initialWebhookIps: string[];
@@ -34,6 +20,25 @@ export interface GithubAwsRunnerProps extends cdk.StackProps {
 export class GithubAwsRunnerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: GithubAwsRunnerProps) {
     super(scope, id, props);
+
+    // SSM parameter prefix — override with CDK context key "ssmPrefix".
+    // Example: cdk deploy --context ssmPrefix=/my-runner
+    const rawPrefix = (this.node.tryGetContext("ssmPrefix") as string | undefined) ?? "/github-aws-runner";
+    const p = rawPrefix.replace(/\/$/, ""); // strip any trailing slash
+
+    const SSM_GITHUB_TOKEN             = `${p}/github-token`;
+    const SSM_WEBHOOK_SECRET           = `${p}/webhook-secret`;
+    const SSM_TARGET_TYPE              = `${p}/target-type`;
+    const SSM_TARGET_SLUG              = `${p}/target-slug`;
+    const SSM_RUNNER_TIMEOUT           = `${p}/runner-timeout-minutes`;
+    const SSM_INSTANCE_TYPE            = `${p}/instance-type`;
+    const SSM_EBS_VOLUME_SIZE          = `${p}/ebs-volume-size-gb`;
+    const SSM_MAX_CONCURRENT_RUNNERS   = `${p}/max-concurrent-runners`;
+    const SSM_API_THROTTLE_RATE        = `${p}/api-throttle-rate-limit`;
+    const SSM_API_THROTTLE_BURST       = `${p}/api-throttle-burst-limit`;
+    const SSM_RUNNER_LABEL             = `${p}/runner-label`;
+    const SSM_ALLOWED_INSTANCE_TYPES   = `${p}/allowed-instance-types`;
+    const SSM_MAX_EBS_VOLUME_SIZE      = `${p}/max-ebs-volume-size-gb`;
 
     // -------------------------------------------------------------------------
     // VPC — single public subnet, no NAT Gateway
