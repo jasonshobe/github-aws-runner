@@ -247,6 +247,31 @@ jobs:
 
 The runner is provisioned automatically when the job is queued and terminated when it completes.
 
+### Caching
+
+Because each runner is a fresh EC2 instance, `actions/cache` will not have access to GitHub's hosted cache. Replace it with [`runs-on/cache`](https://github.com/marketplace/actions/fast-actions-cache-for-s3), which stores cache entries in an S3 bucket. It is a drop-in replacement that accepts the same inputs as `actions/cache`.
+
+You will need an S3 bucket in the same region as this stack. The bucket is not managed by this stack; create it separately. The EC2 instance role must have `s3:GetObject`, `s3:PutObject`, and `s3:ListBucket` permissions on the bucket — add these to the instance role via the AWS Console or a separate CDK stack.
+
+Point the action at your bucket by setting the `RUNS_ON_S3_BUCKET_CACHE` environment variable and replacing `actions/cache` with `runs-on/cache`:
+
+```yaml
+jobs:
+  build:
+    runs-on: self-hosted
+    env:
+      RUNS_ON_S3_BUCKET_CACHE: my-runner-cache-bucket
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: runs-on/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+```
+
 ## Configuration
 
 The EC2 instance type, EBS volume size, and runner timeout are read from SSM at runtime and can be changed without redeploying the stack. The following parameters require a `cdk deploy` to take effect because they are resolved at synth time:
