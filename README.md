@@ -351,6 +351,33 @@ aws ssm put-parameter \
   --overwrite
 ```
 
+### IP Updater
+
+The IP updater Lambda runs on a schedule to keep the API Gateway resource policy in sync with GitHub's current webhook IP ranges. If GitHub's IPs change mid-interval and webhooks start failing, you can trigger an immediate refresh without redeploying.
+
+The Lambda function name is available as a CloudFormation stack output (`IpUpdaterFunctionName`). To invoke it immediately:
+
+```bash
+aws lambda invoke \
+  --function-name $(aws cloudformation describe-stacks \
+    --stack-name GithubAwsRunnerStack \
+    --query 'Stacks[0].Outputs[?OutputKey==`IpUpdaterFunctionName`].OutputValue' \
+    --output text) \
+  /dev/null
+```
+
+To change the schedule interval, update the SSM parameter and redeploy:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/ip-updater-interval-hours \
+  --type String \
+  --value "6" \
+  --overwrite
+
+cdk deploy
+```
+
 ## Cost Protection
 
 The following measures are recommended to prevent unexpected cost overruns but are not managed by the CDK stack.

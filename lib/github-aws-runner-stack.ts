@@ -380,6 +380,11 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       value: api.urlForPath("/webhook"),
       description: "URL to register as the GitHub webhook endpoint",
     });
+
+    new cdk.CfnOutput(this, "IpUpdaterFunctionName", {
+      value: ipUpdaterFn.functionName,
+      description: "IP updater Lambda function name — invoke manually to refresh GitHub webhook IPs immediately",
+    });
   }
 }
 
