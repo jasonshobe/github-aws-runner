@@ -39,6 +39,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_RUNNER_LABEL             = `${p}/runner-label`;
     const SSM_ALLOWED_INSTANCE_TYPES   = `${p}/allowed-instance-types`;
     const SSM_MAX_EBS_VOLUME_SIZE      = `${p}/max-ebs-volume-size-gb`;
+    const SSM_IP_UPDATER_INTERVAL      = `${p}/ip-updater-interval-hours`;
 
     // -------------------------------------------------------------------------
     // VPC — single public subnet, no NAT Gateway
@@ -268,8 +269,15 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       })
     );
 
+    const ipUpdaterIntervalHours = parseInt(
+      ssm.StringParameter.valueFromLookup(this, SSM_IP_UPDATER_INTERVAL),
+      10
+    );
+
     new events.Rule(this, "IpUpdaterSchedule", {
-      schedule: events.Schedule.rate(cdk.Duration.hours(12)),
+      schedule: events.Schedule.rate(
+        cdk.Duration.hours(Number.isNaN(ipUpdaterIntervalHours) ? 12 : ipUpdaterIntervalHours)
+      ),
       targets: [new eventsTargets.LambdaFunction(ipUpdaterFn)],
     });
 

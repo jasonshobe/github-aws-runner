@@ -25,7 +25,7 @@ GitHub Actions job queued
         ├── Runs GitHub Actions job
         └── Self-terminates on completion
 
-Scheduled: every 12 hours
+Scheduled: every N hours (configurable via SSM)
   IP Updater Lambda
   └── Fetches GitHub webhook CIDRs → updates API resource policy
 
@@ -76,6 +76,7 @@ The `/github-aws-runner` prefix used in all parameter names is the default. It c
 | `/github-aws-runner/runner-label` | String | Additional label required on jobs beyond `self-hosted` (optional) |
 | `/github-aws-runner/allowed-instance-types` | String | Comma-separated list of instance types workflows may request (optional) |
 | `/github-aws-runner/max-ebs-volume-size-gb` | String | Upper bound on the EBS volume size workflows may request in GB (optional) |
+| `/github-aws-runner/ip-updater-interval-hours` | String | How often the IP updater runs in hours (e.g. `12`); requires `cdk deploy` to take effect |
 
 ### Creating the parameters
 
@@ -148,6 +149,12 @@ aws ssm put-parameter \
   --name /github-aws-runner/api-throttle-burst-limit \
   --type String \
   --value "5"
+
+# IP updater interval (hours)
+aws ssm put-parameter \
+  --name /github-aws-runner/ip-updater-interval-hours \
+  --type String \
+  --value "12"
 ```
 
 ## Deployment
@@ -245,6 +252,7 @@ The EC2 instance type, EBS volume size, and runner timeout are read from SSM at 
 - **max-concurrent-runners** — also controls Lambda reserved concurrency (the EC2 instance cap takes effect immediately without a deploy)
 - **api-throttle-rate-limit** — controls API Gateway stage throttling
 - **api-throttle-burst-limit** — controls API Gateway stage throttling
+- **ip-updater-interval-hours** — controls the EventBridge schedule rate for the IP updater
 
 ### EC2 Instance Type
 
