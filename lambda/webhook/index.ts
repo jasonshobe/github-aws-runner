@@ -22,6 +22,7 @@ let cachedParams:
       githubToken: string;
       targetType: string;
       targetSlug: string;
+      instanceType: string;
     }
   | undefined;
 
@@ -41,6 +42,7 @@ async function getParams(): Promise<{
   githubToken: string;
   targetType: string;
   targetSlug: string;
+  instanceType: string;
 }> {
   if (cachedParams) return cachedParams;
   const result = await ssm.send(
@@ -49,6 +51,7 @@ async function getParams(): Promise<{
         process.env.GITHUB_TOKEN_PARAM!,
         process.env.TARGET_TYPE_PARAM!,
         process.env.TARGET_SLUG_PARAM!,
+        process.env.INSTANCE_TYPE_PARAM!,
       ],
       WithDecryption: true,
     })
@@ -60,6 +63,7 @@ async function getParams(): Promise<{
     githubToken: byName[process.env.GITHUB_TOKEN_PARAM!],
     targetType: byName[process.env.TARGET_TYPE_PARAM!],
     targetSlug: byName[process.env.TARGET_SLUG_PARAM!],
+    instanceType: byName[process.env.INSTANCE_TYPE_PARAM!],
   };
   return cachedParams;
 }
@@ -134,7 +138,7 @@ export async function handler(
   const jobId = payload.workflow_job.id;
   console.log(`Processing workflow_job.queued event for job ${jobId}`);
 
-  const { githubToken, targetType, targetSlug } = await getParams();
+  const { githubToken, targetType, targetSlug, instanceType } = await getParams();
 
   // Generate JIT runner config
   const { encodedJitConfig } = await generateJitConfig(
@@ -152,7 +156,7 @@ export async function handler(
   await ec2.send(
     new RunInstancesCommand({
       ImageId: process.env.AMI_ID!,
-      InstanceType: (process.env.INSTANCE_TYPE ?? "c7a.large") as never,
+      InstanceType: instanceType as never,
       MinCount: 1,
       MaxCount: 1,
       SubnetId: process.env.SUBNET_ID!,

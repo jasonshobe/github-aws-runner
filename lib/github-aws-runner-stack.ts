@@ -15,19 +15,16 @@ const SSM_WEBHOOK_SECRET = "/github-aws-runner/webhook-secret";
 const SSM_TARGET_TYPE = "/github-aws-runner/target-type";
 const SSM_TARGET_SLUG = "/github-aws-runner/target-slug";
 const SSM_RUNNER_TIMEOUT = "/github-aws-runner/runner-timeout-minutes";
+const SSM_INSTANCE_TYPE = "/github-aws-runner/instance-type";
 
 export interface GithubAwsRunnerProps extends cdk.StackProps {
   /** GitHub webhook source CIDR blocks (from /meta API) used for initial resource policy */
   initialWebhookIps: string[];
-  /** EC2 instance type for runners (default: c7a.large) */
-  instanceType?: string;
 }
 
 export class GithubAwsRunnerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: GithubAwsRunnerProps) {
     super(scope, id, props);
-
-    const instanceType = props.instanceType ?? "c7a.large";
 
     // -------------------------------------------------------------------------
     // VPC — single public subnet, no NAT Gateway
@@ -105,7 +102,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         SECURITY_GROUP_ID: runnerSecurityGroup.securityGroupId,
         INSTANCE_PROFILE_ARN: instanceProfile.attrArn,
         AMI_ID: amiId,
-        INSTANCE_TYPE: instanceType,
+        INSTANCE_TYPE_PARAM: SSM_INSTANCE_TYPE,
       },
     });
 
@@ -117,6 +114,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_WEBHOOK_SECRET),
           ssmArn(this, SSM_TARGET_TYPE),
           ssmArn(this, SSM_TARGET_SLUG),
+          ssmArn(this, SSM_INSTANCE_TYPE),
         ],
       })
     );

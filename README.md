@@ -66,6 +66,7 @@ All configuration is stored in AWS Systems Manager Parameter Store. You must cre
 | `/github-aws-runner/target-type` | String | `repo` or `org` |
 | `/github-aws-runner/target-slug` | String | `owner/repo` (for repo) or `myorg` (for org) |
 | `/github-aws-runner/runner-timeout-minutes` | String | Max runtime per runner in minutes (e.g. `60`) |
+| `/github-aws-runner/instance-type` | String | EC2 instance type for runners (e.g. `c7a.large`) |
 
 ### Creating the parameters
 
@@ -109,6 +110,12 @@ aws ssm put-parameter \
   --name /github-aws-runner/runner-timeout-minutes \
   --type String \
   --value "60"
+
+# EC2 instance type
+aws ssm put-parameter \
+  --name /github-aws-runner/instance-type \
+  --type String \
+  --value "c7a.large"
 ```
 
 ## Deployment
@@ -163,20 +170,23 @@ The runner is provisioned automatically when the job is queued and terminated wh
 
 ## Configuration
 
+Both the EC2 instance type and the runner timeout are read from SSM at runtime, so they can be changed without redeploying the stack.
+
 ### EC2 Instance Type
 
-The default instance type is `c7a.large`. To override it, pass `instanceType` to the stack constructor in [bin/github-aws-runner.ts](bin/github-aws-runner.ts):
+Update the `/github-aws-runner/instance-type` parameter:
 
-```ts
-new GithubAwsRunnerStack(app, "GithubAwsRunnerStack", {
-  initialWebhookIps,
-  instanceType: "m7a.xlarge",
-});
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/instance-type \
+  --type String \
+  --value "m7a.xlarge" \
+  --overwrite
 ```
 
 ### Runner Timeout
 
-The watchdog Lambda runs every 15 minutes and terminates any runner instances older than the value stored in the `/github-aws-runner/runner-timeout-minutes` SSM parameter. Update it at any time without redeploying:
+Update the `/github-aws-runner/runner-timeout-minutes` parameter:
 
 ```bash
 aws ssm put-parameter \
