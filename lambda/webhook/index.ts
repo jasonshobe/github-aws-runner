@@ -256,11 +256,14 @@ function verifySignature(secret: string, body: string, header: string): boolean 
   }
 }
 
-function buildUserData(encodedJitConfig: string): string {
+function buildUserData(encodedJitConfig: string, cacheBucket?: string): string {
+  const cacheEnv = cacheBucket
+    ? `export RUNS_ON_S3_BUCKET_CACHE="${cacheBucket}"\n`
+    : "";
   const script = `#!/bin/bash
 set -euxo pipefail
 JIT_CONFIG="${encodedJitConfig}"
-cd /home/runner/actions-runner
+${cacheEnv}cd /home/runner/actions-runner
 ./run.sh --jitconfig "\${JIT_CONFIG}"
 shutdown -h now
 `;
@@ -375,7 +378,7 @@ export async function handler(
       SubnetId: process.env.SUBNET_ID!,
       SecurityGroupIds: [process.env.SECURITY_GROUP_ID!],
       IamInstanceProfile: { Arn: process.env.INSTANCE_PROFILE_ARN! },
-      UserData: buildUserData(encodedJitConfig),
+      UserData: buildUserData(encodedJitConfig, process.env.CACHE_BUCKET_NAME),
       InstanceInitiatedShutdownBehavior: "terminate",
       BlockDeviceMappings: [
         {

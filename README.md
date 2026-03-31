@@ -76,6 +76,8 @@ The `/github-aws-runner` prefix used in all parameter names is the default. It c
 | `/github-aws-runner/ip-updater-interval-hours` | String | IP updater schedule in hours (default: `12`); requires `cdk deploy` to take effect |
 | `/github-aws-runner/ami-name` | String | AMI name pattern (default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
 | `/github-aws-runner/ami-owners` | String | Comma-separated AMI owner account IDs (default: `135269210855`) |
+| `/github-aws-runner/cache-bucket` | String | Name of the S3 bucket to create for runner caching; if set, the bucket is created and managed by the stack |
+| `/github-aws-runner/cache-expiration-days` | String | Days after which cached objects are deleted (default: `10`; only used when `cache-bucket` is set) |
 
 ### GitHub Token Permissions
 
@@ -251,16 +253,12 @@ The runner is provisioned automatically when the job is queued and terminated wh
 
 Because each runner is a fresh EC2 instance, `actions/cache` will not have access to GitHub's hosted cache. Replace it with [`runs-on/cache`](https://github.com/marketplace/actions/fast-actions-cache-for-s3), which stores cache entries in an S3 bucket. It is a drop-in replacement that accepts the same inputs as `actions/cache`.
 
-You will need an S3 bucket in the same region as this stack. The bucket is not managed by this stack; create it separately. The EC2 instance role must have `s3:GetObject`, `s3:PutObject`, and `s3:ListBucket` permissions on the bucket — add these to the instance role via the AWS Console or a separate CDK stack.
-
-Point the action at your bucket by setting the `RUNS_ON_S3_BUCKET_CACHE` environment variable and replacing `actions/cache` with `runs-on/cache`:
+If you set the `/github-aws-runner/cache-bucket` SSM parameter, the stack creates the S3 bucket, grants the runner instances access, and automatically injects `RUNS_ON_S3_BUCKET_CACHE` into every runner's environment — no per-workflow configuration needed:
 
 ```yaml
 jobs:
   build:
     runs-on: self-hosted
-    env:
-      RUNS_ON_S3_BUCKET_CACHE: my-runner-cache-bucket
     steps:
       - uses: actions/checkout@v4
 
@@ -271,6 +269,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-npm-
 ```
+
+If you prefer to manage the bucket yourself, omit the SSM parameter and set `RUNS_ON_S3_BUCKET_CACHE` in your workflow or as a repository/organization Actions variable instead. In that case you will need to grant the EC2 instance role `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` (on `bucket/*`), and `s3:ListBucket` (on `bucket`) separately.
 
 ## Configuration
 
@@ -396,6 +396,30 @@ aws iam put-role-policy \
     }]
   }'
 ```
+
+### Cache Bucket
+
+Set the `/github-aws-runner/cache-bucket` parameter to have the stack create and manage an S3 bucket for use with [`runs-on/cache`](https://github.com/marketplace/actions/fast-actions-cache-for-s3):
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/cache-bucket \
+  --type String \
+  --value "my-runner-cache-bucket"
+```
+
+Then run `cdk deploy`. The stack will create the bucket if it does not already exist, apply a lifecycle policy, grant the runner EC2 instances access, and automatically inject the bucket name into every runner's environment. If the bucket already exists in your account it will be adopted and the lifecycle policy applied to it.
+
+The default expiration is 10 days. To use a different value:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/cache-expiration-days \
+  --type String \
+  --value "7"
+```
+
+Both parameters require `cdk deploy` to take effect. Removing the `cache-bucket` parameter and redeploying will remove the stack's management of the bucket but the bucket itself is retained.
 
 ### Max Concurrent Runners
 

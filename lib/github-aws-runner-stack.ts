@@ -42,6 +42,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_IP_UPDATER_INTERVAL      = `${p}/ip-updater-interval-hours`;
     const SSM_AMI_NAME                 = `${p}/ami-name`;
     const SSM_AMI_OWNERS               = `${p}/ami-owners`;
+    const SSM_CACHE_BUCKET             = `${p}/cache-bucket`;
+    const SSM_CACHE_EXPIRATION_DAYS    = `${p}/cache-expiration-days`;
 
     // -------------------------------------------------------------------------
     // VPC — single public subnet, no NAT Gateway
@@ -117,6 +119,20 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       10
     );
     const throttlingBurstLimit = Number.isNaN(apiThrottleBurst) ? 5 : apiThrottleBurst;
+
+    // Cache bucket — optional. valueFromLookup returns a dummy string containing
+    // forward-slashes when the parameter is absent; those are not valid in S3
+    // bucket names, so the regex reliably detects "not configured".
+    const cacheBucketRaw = ssm.StringParameter.valueFromLookup(this, SSM_CACHE_BUCKET);
+    const cacheBucketName = /^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$/.test(cacheBucketRaw)
+      ? cacheBucketRaw
+      : undefined;
+
+    const cacheExpirationDaysRaw = parseInt(
+      ssm.StringParameter.valueFromLookup(this, SSM_CACHE_EXPIRATION_DAYS),
+      10
+    );
+    const cacheExpirationDays = Number.isNaN(cacheExpirationDaysRaw) ? 10 : cacheExpirationDaysRaw;
 
     // -------------------------------------------------------------------------
     // Lambda: Webhook handler
@@ -376,6 +392,59 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         TargetSlugParam: SSM_TARGET_SLUG,
       },
     });
+
+    // -------------------------------------------------------------------------
+    // Optional: S3 cache bucket
+    // -------------------------------------------------------------------------
+    if (cacheBucketName !== undefined) {
+      const cacheBucketFn = new NodejsFunction(this, "CacheBucketFn", {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: path.join(__dirname, "../lambda/cache-bucket/index.ts"),
+        handler: "handler",
+        timeout: cdk.Duration.minutes(1),
+        bundling: {
+          externalModules: [],
+        },
+      });
+
+      cacheBucketFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["s3:CreateBucket", "s3:PutLifecycleConfiguration"],
+          resources: [`arn:aws:s3:::${cacheBucketName}`],
+        })
+      );
+
+      const cacheBucketProvider = new cr.Provider(this, "CacheBucketProvider", {
+        onEventHandler: cacheBucketFn,
+      });
+
+      new cdk.CustomResource(this, "CacheBucket", {
+        serviceToken: cacheBucketProvider.serviceToken,
+        resourceType: "Custom::CacheBucket",
+        properties: {
+          BucketName: cacheBucketName,
+          ExpirationDays: String(cacheExpirationDays),
+        },
+      });
+
+      // Grant EC2 runner instances access to read and write cache objects.
+      instanceRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+          resources: [`arn:aws:s3:::${cacheBucketName}/*`],
+        })
+      );
+      instanceRole.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ["s3:ListBucket"],
+          resources: [`arn:aws:s3:::${cacheBucketName}`],
+        })
+      );
+
+      // Inject the bucket name into the runner environment so runs-on/cache
+      // can use it without any per-workflow configuration.
+      webhookFn.addEnvironment("CACHE_BUCKET_NAME", cacheBucketName);
+    }
 
     // -------------------------------------------------------------------------
     // Outputs
