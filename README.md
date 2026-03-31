@@ -34,8 +34,16 @@ Scheduled: every 15 minutes
   └── Terminates any runner instances that exceed the timeout
 
 CDK deploy/destroy
-  Custom Resource Lambda
+  Webhook Registration Lambda
   └── Registers / deregisters the GitHub webhook
+
+CDK deploy/destroy (when cache-bucket SSM param is set)
+  Cache Bucket Lambda
+  └── Creates S3 cache bucket and applies lifecycle policy
+
+CDK deploy/destroy (when oidc-role-policy-arn and oidc-subject-pattern are set)
+  OIDC Lambda
+  └── Sets / deletes AWS_ROLE_ARN Actions variable in GitHub
 ```
 
 ## Prerequisites
