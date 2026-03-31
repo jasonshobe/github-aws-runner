@@ -45,25 +45,17 @@ CDK deploy/destroy
 - [AWS CDK](https://docs.aws.amazon.com/cdk/latest/guide/cli.html) v2 (`npm install -g aws-cdk`)
 - A GitHub personal access token with the required scopes (see below)
 
-## GitHub Token Permissions
-
-The personal access token stored in SSM must have:
-
-| Target | Required scopes |
-|--------|----------------|
-| Repository runners | `administration: write` (fine-grained) or `repo` (classic) |
-| Organization runners | `organization_self_hosted_runners: write` (fine-grained) or `admin:org` (classic) |
-| Webhook management | `admin:repo_hook` (repo) or `admin:org_hook` (org) |
-
 ## SSM Parameters
 
-All configuration is stored in AWS Systems Manager Parameter Store. You must create these parameters in your target account and region before deploying.
+All configuration is stored in AWS Systems Manager Parameter Store. You must create the required parameters before deploying.
 
 The `/github-aws-runner` prefix used in all parameter names is the default. It can be changed by setting the `ssmPrefix` CDK context variable (see [Deployment](#deployment)).
 
+### Required parameters
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `/github-aws-runner/github-token` | SecureString | GitHub personal access token |
+| `/github-aws-runner/github-token` | SecureString | GitHub personal access token (see [GitHub Token Permissions](#github-token-permissions)) |
 | `/github-aws-runner/webhook-secret` | SecureString | Shared secret for HMAC webhook signature validation |
 | `/github-aws-runner/target-type` | String | `repo` or `org` |
 | `/github-aws-runner/target-slug` | String | `owner/repo` (for repo) or `myorg` (for org) |
@@ -73,12 +65,27 @@ The `/github-aws-runner` prefix used in all parameter names is the default. It c
 | `/github-aws-runner/max-concurrent-runners` | String | Max simultaneous runner EC2 instances (e.g. `10`) |
 | `/github-aws-runner/api-throttle-rate-limit` | String | API Gateway steady-state requests per second (e.g. `10`) |
 | `/github-aws-runner/api-throttle-burst-limit` | String | API Gateway burst request limit (e.g. `5`) |
-| `/github-aws-runner/runner-label` | String | Additional label required on jobs beyond `self-hosted` (optional) |
-| `/github-aws-runner/allowed-instance-types` | String | Comma-separated list of instance types workflows may request (optional) |
-| `/github-aws-runner/max-ebs-volume-size-gb` | String | Upper bound on the EBS volume size workflows may request in GB (optional) |
-| `/github-aws-runner/ip-updater-interval-hours` | String | How often the IP updater runs in hours (e.g. `12`); requires `cdk deploy` to take effect |
-| `/github-aws-runner/ami-name` | String | AMI name pattern to search for (optional, default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
-| `/github-aws-runner/ami-owners` | String | Comma-separated list of AMI owner account IDs (optional, default: `135269210855`) |
+
+### Optional parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `/github-aws-runner/runner-label` | String | Additional label required on jobs beyond `self-hosted` |
+| `/github-aws-runner/allowed-instance-types` | String | Comma-separated list of instance types workflows may request via label |
+| `/github-aws-runner/max-ebs-volume-size-gb` | String | Upper bound on the EBS volume size workflows may request in GB |
+| `/github-aws-runner/ip-updater-interval-hours` | String | IP updater schedule in hours (default: `12`); requires `cdk deploy` to take effect |
+| `/github-aws-runner/ami-name` | String | AMI name pattern (default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
+| `/github-aws-runner/ami-owners` | String | Comma-separated AMI owner account IDs (default: `135269210855`) |
+
+### GitHub Token Permissions
+
+The personal access token stored in `/github-aws-runner/github-token` must have:
+
+| Target | Required scopes |
+|--------|----------------|
+| Repository runners | `administration: write` (fine-grained) or `repo` (classic) |
+| Organization runners | `organization_self_hosted_runners: write` (fine-grained) or `admin:org` (classic) |
+| Webhook management | `admin:repo_hook` (repo) or `admin:org_hook` (org) |
 
 ### Creating the parameters
 
@@ -151,12 +158,6 @@ aws ssm put-parameter \
   --name /github-aws-runner/api-throttle-burst-limit \
   --type String \
   --value "5"
-
-# IP updater interval (hours)
-aws ssm put-parameter \
-  --name /github-aws-runner/ip-updater-interval-hours \
-  --type String \
-  --value "12"
 ```
 
 ## Deployment
@@ -187,7 +188,6 @@ aws ssm put-parameter \
 
    The stack will:
    - Fetch current GitHub webhook IP ranges and apply them to the API resource policy
-   - Resolve the RunsOn AMI ID
    - Deploy all AWS resources
    - Register the webhook with GitHub via a custom resource
 
@@ -274,12 +274,23 @@ jobs:
 
 ## Configuration
 
-The EC2 instance type, EBS volume size, and runner timeout are read from SSM at runtime and can be changed without redeploying the stack. The following parameters require a `cdk deploy` to take effect because they are resolved at synth time:
+Most SSM parameters take effect immediately without redeploying the stack. The following require a `cdk deploy` because they are resolved at synth time:
 
-- **max-concurrent-runners** — also controls Lambda reserved concurrency (the EC2 instance cap takes effect immediately without a deploy)
-- **api-throttle-rate-limit** — controls API Gateway stage throttling
-- **api-throttle-burst-limit** — controls API Gateway stage throttling
+- **max-concurrent-runners** — also controls Lambda reserved concurrency
+- **api-throttle-rate-limit** and **api-throttle-burst-limit** — control API Gateway stage throttling
 - **ip-updater-interval-hours** — controls the EventBridge schedule rate for the IP updater
+
+### Runner Timeout
+
+Update the `/github-aws-runner/runner-timeout-minutes` parameter:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/runner-timeout-minutes \
+  --type String \
+  --value "120" \
+  --overwrite
+```
 
 ### EC2 Instance Type
 
@@ -293,19 +304,24 @@ aws ssm put-parameter \
   --overwrite
 ```
 
-### Max Concurrent Runners
+### Runner Label
 
-Update the `/github-aws-runner/max-concurrent-runners` parameter:
+By default, any job with the `self-hosted` label triggers a runner. To require an additional label (e.g. `aws`), set the optional parameter:
 
 ```bash
 aws ssm put-parameter \
-  --name /github-aws-runner/max-concurrent-runners \
+  --name /github-aws-runner/runner-label \
   --type String \
-  --value "10" \
-  --overwrite
+  --value "aws"
 ```
 
-Then run `cdk deploy` to update the Lambda reserved concurrency to match.
+Jobs must then include both labels:
+
+```yaml
+runs-on: [self-hosted, aws]
+```
+
+Delete the parameter to revert to `self-hosted`-only matching. No redeployment needed.
 
 ### Allowed Instance Types
 
@@ -381,24 +397,19 @@ aws iam put-role-policy \
   }'
 ```
 
-### Runner Label
+### Max Concurrent Runners
 
-By default, any job with the `self-hosted` label triggers a runner. To require an additional label (e.g. `aws`), set the optional parameter:
+Update the `/github-aws-runner/max-concurrent-runners` parameter, then run `cdk deploy`:
 
 ```bash
 aws ssm put-parameter \
-  --name /github-aws-runner/runner-label \
+  --name /github-aws-runner/max-concurrent-runners \
   --type String \
-  --value "aws"
+  --value "10" \
+  --overwrite
+
+cdk deploy
 ```
-
-Jobs must then include both labels:
-
-```yaml
-runs-on: [self-hosted, aws]
-```
-
-Delete the parameter to revert to `self-hosted`-only matching. No redeployment needed.
 
 ### API Gateway Throttling
 
@@ -416,18 +427,8 @@ aws ssm put-parameter \
   --type String \
   --value "10" \
   --overwrite
-```
 
-### Runner Timeout
-
-Update the `/github-aws-runner/runner-timeout-minutes` parameter:
-
-```bash
-aws ssm put-parameter \
-  --name /github-aws-runner/runner-timeout-minutes \
-  --type String \
-  --value "120" \
-  --overwrite
+cdk deploy
 ```
 
 ### IP Updater
@@ -485,10 +486,6 @@ cdk destroy
 
 This will delete all AWS resources and deregister the GitHub webhook.
 
-## License
-
-[MIT](LICENSE)
-
 ## Development
 
 ```bash
@@ -498,6 +495,10 @@ npx tsc --noEmit
 # Run tests
 npm test
 
-# Synthesize CloudFormation template (requires AWS credentials for AMI lookup)
+# Synthesize CloudFormation template (requires AWS credentials for context lookups)
 cdk synth
 ```
+
+## License
+
+[MIT](LICENSE)
