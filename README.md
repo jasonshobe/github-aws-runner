@@ -253,7 +253,9 @@ The runner is provisioned automatically when the job is queued and terminated wh
 
 Because each runner is a fresh EC2 instance, `actions/cache` will not have access to GitHub's hosted cache. Replace it with [`runs-on/cache`](https://github.com/marketplace/actions/fast-actions-cache-for-s3), which stores cache entries in an S3 bucket. It is a drop-in replacement that accepts the same inputs as `actions/cache`.
 
-If you set the `/github-aws-runner/cache-bucket` SSM parameter, the stack creates the S3 bucket, grants the runner instances access, and automatically injects `RUNS_ON_S3_BUCKET_CACHE` into every runner's environment — no per-workflow configuration needed:
+No explicit AWS credential setup is required in your workflow. Each runner is an EC2 instance with an IAM instance profile, so the AWS SDK credential provider chain automatically uses the instance role — the same role that is granted access to the cache bucket.
+
+If you set the `/github-aws-runner/cache-bucket` SSM parameter, the stack creates the S3 bucket, grants the runner instances access, and automatically injects `RUNS_ON_S3_BUCKET_CACHE` into every runner's environment. The only change needed in a workflow is replacing `actions/cache` with `runs-on/cache`:
 
 ```yaml
 jobs:
