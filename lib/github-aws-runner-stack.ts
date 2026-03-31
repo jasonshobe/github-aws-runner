@@ -6,6 +6,8 @@ import * as eventsTargets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as cr from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 import * as path from "path";
@@ -17,6 +19,10 @@ const SSM_TARGET_SLUG = "/github-aws-runner/target-slug";
 const SSM_RUNNER_TIMEOUT = "/github-aws-runner/runner-timeout-minutes";
 const SSM_INSTANCE_TYPE = "/github-aws-runner/instance-type";
 const SSM_EBS_VOLUME_SIZE = "/github-aws-runner/ebs-volume-size-gb";
+const SSM_MAX_CONCURRENT_RUNNERS = "/github-aws-runner/max-concurrent-runners";
+const SSM_API_THROTTLE_RATE = "/github-aws-runner/api-throttle-rate-limit";
+const SSM_API_THROTTLE_BURST = "/github-aws-runner/api-throttle-burst-limit";
+const SSM_RUNNER_LABEL = "/github-aws-runner/runner-label";
 
 export interface GithubAwsRunnerProps extends cdk.StackProps {
   /** GitHub webhook source CIDR blocks (from /meta API) used for initial resource policy */
@@ -84,6 +90,34 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const amiId = runnerAmi.getImage(this).imageId;
 
     // -------------------------------------------------------------------------
+    // Max concurrent runners — read at synth time for Lambda reserved concurrency;
+    // also passed to the Lambda for the runtime EC2 cap check.
+    // Requires cdk deploy to pick up SSM changes.
+    // -------------------------------------------------------------------------
+    const maxConcurrentRunnersStr = ssm.StringParameter.valueFromLookup(
+      this,
+      SSM_MAX_CONCURRENT_RUNNERS
+    );
+    const maxConcurrentRunners = parseInt(maxConcurrentRunnersStr, 10);
+    // valueFromLookup returns a dummy string on first synth before the context
+    // is populated; fall back to a safe default so the synth does not fail.
+    const reservedConcurrency = Number.isNaN(maxConcurrentRunners)
+      ? 10
+      : maxConcurrentRunners;
+
+    const apiThrottleRate = parseInt(
+      ssm.StringParameter.valueFromLookup(this, SSM_API_THROTTLE_RATE),
+      10
+    );
+    const throttlingRateLimit = Number.isNaN(apiThrottleRate) ? 10 : apiThrottleRate;
+
+    const apiThrottleBurst = parseInt(
+      ssm.StringParameter.valueFromLookup(this, SSM_API_THROTTLE_BURST),
+      10
+    );
+    const throttlingBurstLimit = Number.isNaN(apiThrottleBurst) ? 5 : apiThrottleBurst;
+
+    // -------------------------------------------------------------------------
     // Lambda: Webhook handler
     // -------------------------------------------------------------------------
     const webhookFn = new NodejsFunction(this, "WebhookFn", {
@@ -91,6 +125,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       entry: path.join(__dirname, "../lambda/webhook/index.ts"),
       handler: "handler",
       timeout: cdk.Duration.seconds(30),
+      reservedConcurrentExecutions: reservedConcurrency,
       bundling: {
         externalModules: [],
       },
@@ -105,6 +140,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         AMI_ID: amiId,
         INSTANCE_TYPE_PARAM: SSM_INSTANCE_TYPE,
         EBS_VOLUME_SIZE_PARAM: SSM_EBS_VOLUME_SIZE,
+        MAX_CONCURRENT_RUNNERS_PARAM: SSM_MAX_CONCURRENT_RUNNERS,
+        RUNNER_LABEL_PARAM: SSM_RUNNER_LABEL,
       },
     });
 
@@ -118,14 +155,23 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_TARGET_SLUG),
           ssmArn(this, SSM_INSTANCE_TYPE),
           ssmArn(this, SSM_EBS_VOLUME_SIZE),
+          ssmArn(this, SSM_MAX_CONCURRENT_RUNNERS),
+          ssmArn(this, SSM_RUNNER_LABEL),
         ],
       })
     );
 
+    // RunInstances is allowed only when the request includes the managed tag,
+    // preventing the Lambda role from launching untagged instances.
     webhookFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ec2:RunInstances"],
         resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "aws:RequestTag/github-aws-runner:managed": "true",
+          },
+        },
       })
     );
 
@@ -148,15 +194,32 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       })
     );
 
+    // Needed for the concurrent runner cap check before launching.
+    webhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:DescribeInstances"],
+        resources: ["*"],
+      })
+    );
+
     // -------------------------------------------------------------------------
     // REST API with resource policy restricting to GitHub webhook IPs
     // -------------------------------------------------------------------------
+    const accessLogGroup = new logs.LogGroup(this, "WebhookApiAccessLogs", {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const api = new apigateway.RestApi(this, "WebhookApi", {
       restApiName: "github-aws-runner-webhook",
       description: "Receives GitHub Actions webhook events",
       policy: buildResourcePolicy(props.initialWebhookIps),
       deployOptions: {
         stageName: "prod",
+        throttlingRateLimit,
+        throttlingBurstLimit,
+        accessLogDestination: new apigateway.LogGroupLogDestination(accessLogGroup),
+        accessLogFormat: apigateway.AccessLogFormat.jsonWithStandardFields(),
       },
     });
 

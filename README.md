@@ -68,6 +68,10 @@ All configuration is stored in AWS Systems Manager Parameter Store. You must cre
 | `/github-aws-runner/runner-timeout-minutes` | String | Max runtime per runner in minutes (e.g. `60`) |
 | `/github-aws-runner/instance-type` | String | EC2 instance type for runners (e.g. `c7a.large`) |
 | `/github-aws-runner/ebs-volume-size-gb` | String | Root EBS volume size in GB (e.g. `80`) |
+| `/github-aws-runner/max-concurrent-runners` | String | Max simultaneous runner EC2 instances (e.g. `10`) |
+| `/github-aws-runner/api-throttle-rate-limit` | String | API Gateway steady-state requests per second (e.g. `10`) |
+| `/github-aws-runner/api-throttle-burst-limit` | String | API Gateway burst request limit (e.g. `5`) |
+| `/github-aws-runner/runner-label` | String | Additional label required on jobs beyond `self-hosted` (optional) |
 
 ### Creating the parameters
 
@@ -123,6 +127,23 @@ aws ssm put-parameter \
   --name /github-aws-runner/ebs-volume-size-gb \
   --type String \
   --value "80"
+
+# Max concurrent runners
+aws ssm put-parameter \
+  --name /github-aws-runner/max-concurrent-runners \
+  --type String \
+  --value "10"
+
+# API Gateway throttling
+aws ssm put-parameter \
+  --name /github-aws-runner/api-throttle-rate-limit \
+  --type String \
+  --value "10"
+
+aws ssm put-parameter \
+  --name /github-aws-runner/api-throttle-burst-limit \
+  --type String \
+  --value "5"
 ```
 
 ## Deployment
@@ -173,11 +194,28 @@ jobs:
       - run: echo "Running on an ephemeral AWS runner"
 ```
 
+If you have configured the optional `/github-aws-runner/runner-label` SSM parameter (e.g. `aws`), include it alongside `self-hosted`:
+
+```yaml
+jobs:
+  build:
+    runs-on: [self-hosted, aws]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Running on an ephemeral AWS runner"
+```
+
+Jobs that do not include the required additional label are ignored and will not trigger a runner launch.
+
 The runner is provisioned automatically when the job is queued and terminated when it completes.
 
 ## Configuration
 
-Both the EC2 instance type and the runner timeout are read from SSM at runtime, so they can be changed without redeploying the stack.
+The EC2 instance type, EBS volume size, and runner timeout are read from SSM at runtime and can be changed without redeploying the stack. The following parameters require a `cdk deploy` to take effect because they are resolved at synth time:
+
+- **max-concurrent-runners** — also controls Lambda reserved concurrency (the EC2 instance cap takes effect immediately without a deploy)
+- **api-throttle-rate-limit** — controls API Gateway stage throttling
+- **api-throttle-burst-limit** — controls API Gateway stage throttling
 
 ### EC2 Instance Type
 
@@ -188,6 +226,57 @@ aws ssm put-parameter \
   --name /github-aws-runner/instance-type \
   --type String \
   --value "m7a.xlarge" \
+  --overwrite
+```
+
+### Max Concurrent Runners
+
+Update the `/github-aws-runner/max-concurrent-runners` parameter:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/max-concurrent-runners \
+  --type String \
+  --value "10" \
+  --overwrite
+```
+
+Then run `cdk deploy` to update the Lambda reserved concurrency to match.
+
+### Runner Label
+
+By default, any job with the `self-hosted` label triggers a runner. To require an additional label (e.g. `aws`), set the optional parameter:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/runner-label \
+  --type String \
+  --value "aws"
+```
+
+Jobs must then include both labels:
+
+```yaml
+runs-on: [self-hosted, aws]
+```
+
+Delete the parameter to revert to `self-hosted`-only matching. No redeployment needed.
+
+### API Gateway Throttling
+
+Update the rate and burst parameters, then run `cdk deploy`:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/api-throttle-rate-limit \
+  --type String \
+  --value "20" \
+  --overwrite
+
+aws ssm put-parameter \
+  --name /github-aws-runner/api-throttle-burst-limit \
+  --type String \
+  --value "10" \
   --overwrite
 ```
 
@@ -202,6 +291,26 @@ aws ssm put-parameter \
   --value "120" \
   --overwrite
 ```
+
+## Cost Protection
+
+The following measures are recommended to prevent unexpected cost overruns but are not managed by the CDK stack.
+
+### AWS Budgets
+
+Set up a monthly budget to receive an alert when estimated charges exceed a threshold:
+
+1. Open the [AWS Billing console](https://console.aws.amazon.com/billing/home#/budgets) and choose **Create budget**.
+2. Select **Cost budget** and set a monthly amount appropriate for your expected usage.
+3. Add an alert at 80% of the budgeted amount with an email or SNS notification.
+
+### AWS Cost Anomaly Detection
+
+Cost Anomaly Detection identifies unusual spending patterns beyond simple threshold alerts:
+
+1. Open the [Cost Anomaly Detection console](https://console.aws.amazon.com/cost-management/home#/anomaly-detection).
+2. Create a monitor scoped to the **EC2** service (the primary cost driver for this project).
+3. Create an alert subscription with your preferred notification method.
 
 ## Teardown
 

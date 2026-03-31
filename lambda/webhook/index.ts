@@ -2,6 +2,7 @@ import * as crypto from "crypto";
 import {
   EC2Client,
   RunInstancesCommand,
+  DescribeInstancesCommand,
   ResourceType,
 } from "@aws-sdk/client-ec2";
 import {
@@ -24,6 +25,8 @@ let cachedParams:
       targetSlug: string;
       instanceType: string;
       ebsVolumeSizeGb: number;
+      maxConcurrentRunners: number;
+      runnerLabel: string | undefined;
     }
   | undefined;
 
@@ -45,6 +48,8 @@ async function getParams(): Promise<{
   targetSlug: string;
   instanceType: string;
   ebsVolumeSizeGb: number;
+  maxConcurrentRunners: number;
+  runnerLabel: string | undefined;
 }> {
   if (cachedParams) return cachedParams;
   const result = await ssm.send(
@@ -55,6 +60,8 @@ async function getParams(): Promise<{
         process.env.TARGET_SLUG_PARAM!,
         process.env.INSTANCE_TYPE_PARAM!,
         process.env.EBS_VOLUME_SIZE_PARAM!,
+        process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
+        process.env.RUNNER_LABEL_PARAM!,
       ],
       WithDecryption: true,
     })
@@ -68,8 +75,32 @@ async function getParams(): Promise<{
     targetSlug: byName[process.env.TARGET_SLUG_PARAM!],
     instanceType: byName[process.env.INSTANCE_TYPE_PARAM!],
     ebsVolumeSizeGb: parseInt(byName[process.env.EBS_VOLUME_SIZE_PARAM!], 10),
+    maxConcurrentRunners: parseInt(byName[process.env.MAX_CONCURRENT_RUNNERS_PARAM!], 10),
+    // Optional — omitted from byName if the SSM parameter does not exist
+    runnerLabel: byName[process.env.RUNNER_LABEL_PARAM!],
   };
   return cachedParams;
+}
+
+async function countRunningRunners(): Promise<number> {
+  let count = 0;
+  let nextToken: string | undefined;
+  do {
+    const result = await ec2.send(
+      new DescribeInstancesCommand({
+        Filters: [
+          { Name: "tag:github-aws-runner:managed", Values: ["true"] },
+          { Name: "instance-state-name", Values: ["pending", "running"] },
+        ],
+        NextToken: nextToken,
+      })
+    );
+    for (const reservation of result.Reservations ?? []) {
+      count += reservation.Instances?.length ?? 0;
+    }
+    nextToken = result.NextToken;
+  } while (nextToken);
+  return count;
 }
 
 function verifySignature(secret: string, body: string, header: string): boolean {
@@ -140,9 +171,25 @@ export async function handler(
   }
 
   const jobId = payload.workflow_job.id;
+
+  const { githubToken, targetType, targetSlug, instanceType, ebsVolumeSizeGb, maxConcurrentRunners, runnerLabel } =
+    await getParams();
+
+  if (runnerLabel && !payload.workflow_job.labels.includes(runnerLabel)) {
+    console.log(`Job ${jobId} does not include required label "${runnerLabel}", ignoring`);
+    return { statusCode: 200, body: "OK" };
+  }
+
   console.log(`Processing workflow_job.queued event for job ${jobId}`);
 
-  const { githubToken, targetType, targetSlug, instanceType, ebsVolumeSizeGb } = await getParams();
+  // Enforce concurrent runner cap before launching
+  const runningCount = await countRunningRunners();
+  if (runningCount >= maxConcurrentRunners) {
+    console.warn(
+      `Concurrent runner limit reached (${runningCount}/${maxConcurrentRunners}), rejecting job ${jobId}`
+    );
+    return { statusCode: 503, body: "Service Unavailable" };
+  }
 
   // Generate JIT runner config
   const { encodedJitConfig } = await generateJitConfig(
