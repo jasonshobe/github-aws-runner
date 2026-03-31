@@ -72,6 +72,8 @@ All configuration is stored in AWS Systems Manager Parameter Store. You must cre
 | `/github-aws-runner/api-throttle-rate-limit` | String | API Gateway steady-state requests per second (e.g. `10`) |
 | `/github-aws-runner/api-throttle-burst-limit` | String | API Gateway burst request limit (e.g. `5`) |
 | `/github-aws-runner/runner-label` | String | Additional label required on jobs beyond `self-hosted` (optional) |
+| `/github-aws-runner/allowed-instance-types` | String | Comma-separated list of instance types workflows may request (optional) |
+| `/github-aws-runner/max-ebs-volume-size-gb` | String | Upper bound on the EBS volume size workflows may request in GB (optional) |
 
 ### Creating the parameters
 
@@ -207,6 +209,18 @@ jobs:
 
 Jobs that do not include the required additional label are ignored and will not trigger a runner launch.
 
+Workflows can also request a specific EC2 instance type or disk size using labels. The instance type must be in the `/github-aws-runner/allowed-instance-types` list and the disk size may not exceed `/github-aws-runner/max-ebs-volume-size-gb`. If either SSM parameter is not configured, the corresponding label is ignored and the SSM default is used.
+
+```yaml
+jobs:
+  build:
+    # Request a larger instance and more disk space
+    runs-on: [self-hosted, instance-type:m7a.2xlarge, disk:200]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Running on a large ephemeral AWS runner"
+```
+
 The runner is provisioned automatically when the job is queued and terminated when it completes.
 
 ## Configuration
@@ -242,6 +256,28 @@ aws ssm put-parameter \
 ```
 
 Then run `cdk deploy` to update the Lambda reserved concurrency to match.
+
+### Allowed Instance Types
+
+Set the comma-separated list of instance types that workflows may request via the `instance-type:` label. If this parameter is not set, instance type labels in workflows are ignored and the default is always used.
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/allowed-instance-types \
+  --type String \
+  --value "c7a.large,c7a.xlarge,m7a.xlarge,m7a.2xlarge"
+```
+
+### Max EBS Volume Size
+
+Set the upper bound on disk sizes that workflows may request via the `disk:` label. Requests that exceed this value are silently capped. If this parameter is not set, no upper bound is enforced.
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/max-ebs-volume-size-gb \
+  --type String \
+  --value "500"
+```
 
 ### Runner Label
 

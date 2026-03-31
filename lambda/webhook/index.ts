@@ -27,6 +27,8 @@ let cachedParams:
       ebsVolumeSizeGb: number;
       maxConcurrentRunners: number;
       runnerLabel: string | undefined;
+      allowedInstanceTypes: string[] | undefined;
+      maxEbsVolumeSizeGb: number | undefined;
     }
   | undefined;
 
@@ -50,6 +52,8 @@ async function getParams(): Promise<{
   ebsVolumeSizeGb: number;
   maxConcurrentRunners: number;
   runnerLabel: string | undefined;
+  allowedInstanceTypes: string[] | undefined;
+  maxEbsVolumeSizeGb: number | undefined;
 }> {
   if (cachedParams) return cachedParams;
   const result = await ssm.send(
@@ -62,6 +66,8 @@ async function getParams(): Promise<{
         process.env.EBS_VOLUME_SIZE_PARAM!,
         process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
         process.env.RUNNER_LABEL_PARAM!,
+        process.env.ALLOWED_INSTANCE_TYPES_PARAM!,
+        process.env.MAX_EBS_VOLUME_SIZE_PARAM!,
       ],
       WithDecryption: true,
     })
@@ -69,6 +75,8 @@ async function getParams(): Promise<{
   const byName = Object.fromEntries(
     (result.Parameters ?? []).map((p: { Name?: string; Value?: string }) => [p.Name!, p.Value!])
   );
+  const allowedRaw = byName[process.env.ALLOWED_INSTANCE_TYPES_PARAM!];
+  const maxEbsRaw = byName[process.env.MAX_EBS_VOLUME_SIZE_PARAM!];
   cachedParams = {
     githubToken: byName[process.env.GITHUB_TOKEN_PARAM!],
     targetType: byName[process.env.TARGET_TYPE_PARAM!],
@@ -78,6 +86,10 @@ async function getParams(): Promise<{
     maxConcurrentRunners: parseInt(byName[process.env.MAX_CONCURRENT_RUNNERS_PARAM!], 10),
     // Optional — omitted from byName if the SSM parameter does not exist
     runnerLabel: byName[process.env.RUNNER_LABEL_PARAM!],
+    allowedInstanceTypes: allowedRaw
+      ? allowedRaw.split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined,
+    maxEbsVolumeSizeGb: maxEbsRaw ? parseInt(maxEbsRaw, 10) : undefined,
   };
   return cachedParams;
 }
@@ -101,6 +113,52 @@ async function countRunningRunners(): Promise<number> {
     nextToken = result.NextToken;
   } while (nextToken);
   return count;
+}
+
+function parseLabelValue(labels: string[], prefix: string): string | undefined {
+  const label = labels.find((l) => l.startsWith(`${prefix}:`));
+  return label ? label.slice(prefix.length + 1) : undefined;
+}
+
+function resolveInstanceType(
+  labels: string[],
+  defaultType: string,
+  allowedTypes: string[] | undefined
+): string {
+  const labelValue = parseLabelValue(labels, "instance-type");
+  if (!labelValue) return defaultType;
+  if (!allowedTypes) {
+    console.warn(
+      `instance-type label "${labelValue}" ignored: allowed-instance-types SSM parameter not configured`
+    );
+    return defaultType;
+  }
+  if (!allowedTypes.includes(labelValue)) {
+    console.warn(
+      `instance-type label "${labelValue}" is not in the allowed list, using default "${defaultType}"`
+    );
+    return defaultType;
+  }
+  return labelValue;
+}
+
+function resolveEbsSize(
+  labels: string[],
+  defaultSize: number,
+  maxSize: number | undefined
+): number {
+  const labelValue = parseLabelValue(labels, "disk");
+  if (!labelValue) return defaultSize;
+  const parsed = parseInt(labelValue, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    console.warn(`disk label "${labelValue}" is not a valid size, using default ${defaultSize}GB`);
+    return defaultSize;
+  }
+  if (maxSize !== undefined && parsed > maxSize) {
+    console.warn(`disk label ${parsed}GB exceeds max ${maxSize}GB, capping`);
+    return maxSize;
+  }
+  return parsed;
 }
 
 function verifySignature(secret: string, body: string, header: string): boolean {
@@ -172,15 +230,34 @@ export async function handler(
 
   const jobId = payload.workflow_job.id;
 
-  const { githubToken, targetType, targetSlug, instanceType, ebsVolumeSizeGb, maxConcurrentRunners, runnerLabel } =
-    await getParams();
+  const {
+    githubToken, targetType, targetSlug,
+    instanceType, ebsVolumeSizeGb,
+    maxConcurrentRunners, runnerLabel,
+    allowedInstanceTypes, maxEbsVolumeSizeGb,
+  } = await getParams();
 
   if (runnerLabel && !payload.workflow_job.labels.includes(runnerLabel)) {
     console.log(`Job ${jobId} does not include required label "${runnerLabel}", ignoring`);
     return { statusCode: 200, body: "OK" };
   }
 
-  console.log(`Processing workflow_job.queued event for job ${jobId}`);
+  // Resolve instance type and EBS size from labels (with SSM defaults and constraints)
+  const resolvedInstanceType = resolveInstanceType(
+    payload.workflow_job.labels,
+    instanceType,
+    allowedInstanceTypes
+  );
+  const resolvedEbsSize = resolveEbsSize(
+    payload.workflow_job.labels,
+    ebsVolumeSizeGb,
+    maxEbsVolumeSizeGb
+  );
+
+  console.log(
+    `Processing workflow_job.queued event for job ${jobId} ` +
+    `(instance-type=${resolvedInstanceType}, disk=${resolvedEbsSize}GB)`
+  );
 
   // Enforce concurrent runner cap before launching
   const runningCount = await countRunningRunners();
@@ -207,7 +284,7 @@ export async function handler(
   await ec2.send(
     new RunInstancesCommand({
       ImageId: process.env.AMI_ID!,
-      InstanceType: instanceType as never,
+      InstanceType: resolvedInstanceType as never,
       MinCount: 1,
       MaxCount: 1,
       SubnetId: process.env.SUBNET_ID!,
@@ -218,7 +295,7 @@ export async function handler(
       BlockDeviceMappings: [
         {
           DeviceName: "/dev/sda1",
-          Ebs: { VolumeSize: ebsVolumeSizeGb, VolumeType: "gp3", DeleteOnTermination: true },
+          Ebs: { VolumeSize: resolvedEbsSize, VolumeType: "gp3", DeleteOnTermination: true },
         },
       ],
       TagSpecifications: [

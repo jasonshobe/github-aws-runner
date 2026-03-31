@@ -23,6 +23,8 @@ const SSM_MAX_CONCURRENT_RUNNERS = "/github-aws-runner/max-concurrent-runners";
 const SSM_API_THROTTLE_RATE = "/github-aws-runner/api-throttle-rate-limit";
 const SSM_API_THROTTLE_BURST = "/github-aws-runner/api-throttle-burst-limit";
 const SSM_RUNNER_LABEL = "/github-aws-runner/runner-label";
+const SSM_ALLOWED_INSTANCE_TYPES = "/github-aws-runner/allowed-instance-types";
+const SSM_MAX_EBS_VOLUME_SIZE = "/github-aws-runner/max-ebs-volume-size-gb";
 
 export interface GithubAwsRunnerProps extends cdk.StackProps {
   /** GitHub webhook source CIDR blocks (from /meta API) used for initial resource policy */
@@ -142,6 +144,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         EBS_VOLUME_SIZE_PARAM: SSM_EBS_VOLUME_SIZE,
         MAX_CONCURRENT_RUNNERS_PARAM: SSM_MAX_CONCURRENT_RUNNERS,
         RUNNER_LABEL_PARAM: SSM_RUNNER_LABEL,
+        ALLOWED_INSTANCE_TYPES_PARAM: SSM_ALLOWED_INSTANCE_TYPES,
+        MAX_EBS_VOLUME_SIZE_PARAM: SSM_MAX_EBS_VOLUME_SIZE,
       },
     });
 
@@ -157,6 +161,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_EBS_VOLUME_SIZE),
           ssmArn(this, SSM_MAX_CONCURRENT_RUNNERS),
           ssmArn(this, SSM_RUNNER_LABEL),
+          ssmArn(this, SSM_ALLOWED_INSTANCE_TYPES),
+          ssmArn(this, SSM_MAX_EBS_VOLUME_SIZE),
         ],
       })
     );
