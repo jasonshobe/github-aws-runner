@@ -44,6 +44,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_AMI_OWNERS               = `${p}/ami-owners`;
     const SSM_CACHE_BUCKET             = `${p}/cache-bucket`;
     const SSM_CACHE_EXPIRATION_DAYS    = `${p}/cache-expiration-days`;
+    const SSM_OIDC_ROLE_POLICY_ARN     = `${p}/oidc-role-policy-arn`;
+    const SSM_OIDC_SUBJECT_PATTERN     = `${p}/oidc-subject-pattern`;
 
     // -------------------------------------------------------------------------
     // VPC — single public subnet, no NAT Gateway
@@ -133,6 +135,20 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       10
     );
     const cacheExpirationDays = Number.isNaN(cacheExpirationDaysRaw) ? 10 : cacheExpirationDaysRaw;
+
+    // OIDC — both parameters must be set together. Policy ARN is detected by
+    // the leading "arn:aws:iam::" prefix; subject pattern by absence of the
+    // CDK dummy-value prefix. If either is missing the block is skipped.
+    const oidcPolicyArnRaw = ssm.StringParameter.valueFromLookup(this, SSM_OIDC_ROLE_POLICY_ARN);
+    const oidcPolicyArn = oidcPolicyArnRaw.startsWith("arn:aws:iam::")
+      ? oidcPolicyArnRaw
+      : undefined;
+
+    const oidcSubjectPatternRaw = ssm.StringParameter.valueFromLookup(this, SSM_OIDC_SUBJECT_PATTERN);
+    const oidcSubjectPattern =
+      oidcPolicyArn !== undefined && !oidcSubjectPatternRaw.startsWith("dummy-value-for-")
+        ? oidcSubjectPatternRaw
+        : undefined;
 
     // -------------------------------------------------------------------------
     // Lambda: Webhook handler
@@ -444,6 +460,90 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       // Inject the bucket name into the runner environment so runs-on/cache
       // can use it without any per-workflow configuration.
       webhookFn.addEnvironment("CACHE_BUCKET_NAME", cacheBucketName);
+    }
+
+    // -------------------------------------------------------------------------
+    // Optional: GitHub OIDC authentication
+    // -------------------------------------------------------------------------
+    if (oidcPolicyArn !== undefined && oidcSubjectPattern !== undefined) {
+      // GitHub's OIDC provider — one per AWS account. If another stack in
+      // the same account already manages this provider, import it instead:
+      // iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(...)
+      const githubOidcProvider = new iam.OpenIdConnectProvider(
+        this,
+        "GithubOidcProvider",
+        {
+          url: "https://token.actions.githubusercontent.com",
+          clientIds: ["sts.amazonaws.com"],
+          // AWS validates GitHub's certificate automatically; the thumbprint
+          // is required by CloudFormation but not used for chain validation.
+          thumbprints: ["6938fd4d98bab03faadb97b34396831e3780aea1"],
+        }
+      );
+
+      const oidcRole = new iam.Role(this, "OidcRole", {
+        assumedBy: new iam.WebIdentityPrincipal(
+          githubOidcProvider.openIdConnectProviderArn,
+          {
+            StringEquals: {
+              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+            },
+            StringLike: {
+              "token.actions.githubusercontent.com:sub": oidcSubjectPattern,
+            },
+          }
+        ),
+        description: "Assumed by GitHub Actions workflows via OIDC",
+      });
+
+      oidcRole.addManagedPolicy(
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          "OidcRoleManagedPolicy",
+          oidcPolicyArn
+        )
+      );
+
+      const oidcFn = new NodejsFunction(this, "OidcFn", {
+        runtime: lambda.Runtime.NODEJS_22_X,
+        entry: path.join(__dirname, "../lambda/oidc/index.ts"),
+        handler: "handler",
+        timeout: cdk.Duration.minutes(1),
+        bundling: {
+          externalModules: [],
+        },
+      });
+
+      oidcFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter", "ssm:GetParameters"],
+          resources: [
+            ssmArn(this, SSM_GITHUB_TOKEN),
+            ssmArn(this, SSM_TARGET_TYPE),
+            ssmArn(this, SSM_TARGET_SLUG),
+          ],
+        })
+      );
+
+      const oidcProvider = new cr.Provider(this, "OidcProvider", {
+        onEventHandler: oidcFn,
+      });
+
+      new cdk.CustomResource(this, "GithubOidcConfiguration", {
+        serviceToken: oidcProvider.serviceToken,
+        resourceType: "Custom::GithubOidcConfiguration",
+        properties: {
+          RoleArn: oidcRole.roleArn,
+          GithubTokenParam: SSM_GITHUB_TOKEN,
+          TargetTypeParam: SSM_TARGET_TYPE,
+          TargetSlugParam: SSM_TARGET_SLUG,
+        },
+      });
+
+      new cdk.CfnOutput(this, "OidcRoleArn", {
+        value: oidcRole.roleArn,
+        description: "IAM role ARN for GitHub Actions OIDC authentication",
+      });
     }
 
     // -------------------------------------------------------------------------

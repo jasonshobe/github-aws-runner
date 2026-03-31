@@ -49,22 +49,25 @@ This is a CDK TypeScript project that provisions on-demand ephemeral GitHub Acti
 | IP Updater | `lambda/ip-updater/index.ts` | EventBridge (configurable interval) | Refresh API resource policy with GitHub CIDRs |
 | Watchdog | `lambda/watchdog/index.ts` | EventBridge (every 15 min) | Terminate timed-out runner instances |
 | Custom Resource | `lambda/custom-resource/index.ts` | CloudFormation lifecycle | Register/deregister GitHub webhook |
+| Cache Bucket | `lambda/cache-bucket/index.ts` | CloudFormation lifecycle (conditional) | Create S3 cache bucket and apply lifecycle policy |
+| OIDC | `lambda/oidc/index.ts` | CloudFormation lifecycle (conditional) | Set/delete `AWS_ROLE_ARN` GitHub Actions variable |
 
-GitHub API calls (JIT config generation, webhook create/delete) are in `lambda/webhook/github-client.ts`.
+GitHub API calls (JIT config generation, webhook create/delete, Actions variable set/delete) are in `lambda/webhook/github-client.ts`.
 
 ### CDK Stack Structure
 
 The stack constructor (`lib/github-aws-runner-stack.ts`) is organized into sections in this order:
 1. SSM parameter name constants (all built from the configurable prefix)
-2. Synth-time SSM lookups (`valueFromLookup`) for concurrency, throttling, and IP updater interval
+2. Synth-time SSM lookups (`valueFromLookup`) for concurrency, throttling, IP updater interval, cache bucket, and OIDC
 3. VPC and security group
 4. EC2 IAM role and instance profile
-5. AMI lookup (RunsOn image, owner `135269210855`)
-6. Webhook Lambda + API Gateway (RestApi, resource policy, deployment stage, access logs, POST route)
-7. IP Updater Lambda + EventBridge rule
-8. Watchdog Lambda + EventBridge rule
-9. Custom resource (webhook registration) + provider
-10. Stack output (webhook URL)
+5. Webhook Lambda + API Gateway (RestApi, resource policy, deployment stage, access logs, POST route)
+6. IP Updater Lambda + EventBridge rule
+7. Watchdog Lambda + EventBridge rule
+8. Custom resource (webhook registration) + provider
+9. Conditional: S3 cache bucket custom resource + provider (when `cache-bucket` SSM param is set)
+10. Conditional: OIDC provider, IAM role, OIDC custom resource + provider (when both `oidc-role-policy-arn` and `oidc-subject-pattern` SSM params are set)
+11. Stack outputs
 
 ### Tests
 

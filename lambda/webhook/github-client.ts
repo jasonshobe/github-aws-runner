@@ -145,10 +145,105 @@ export async function deleteWebhook(
   }
 }
 
+/**
+ * Creates or updates a GitHub Actions variable in a repo or org.
+ * Attempts POST (create); falls back to PATCH (update) if the variable already exists.
+ * For org variables, visibility is set to "all".
+ */
+export async function setVariable(
+  targetType: string,
+  targetSlug: string,
+  name: string,
+  value: string,
+  token: string
+): Promise<void> {
+  const base = variablesEndpoint(targetType, targetSlug);
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json",
+  };
+  const body: Record<string, string> = { name, value };
+  if (targetType === "org") {
+    body.visibility = "all";
+  }
+
+  const createResponse = await fetch(base, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (createResponse.status === 409 || createResponse.status === 422) {
+    // Variable already exists — update it
+    const updateResponse = await fetch(`${base}/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (!updateResponse.ok) {
+      const text = await updateResponse.text();
+      throw new Error(
+        `GitHub variable update failed: ${updateResponse.status} ${updateResponse.statusText} — ${text}`
+      );
+    }
+    return;
+  }
+
+  if (!createResponse.ok) {
+    const text = await createResponse.text();
+    throw new Error(
+      `GitHub variable create failed: ${createResponse.status} ${createResponse.statusText} — ${text}`
+    );
+  }
+}
+
+/**
+ * Deletes a GitHub Actions variable from a repo or org.
+ * Returns silently if the variable is already gone (404).
+ */
+export async function deleteVariable(
+  targetType: string,
+  targetSlug: string,
+  name: string,
+  token: string
+): Promise<void> {
+  const endpoint = `${variablesEndpoint(targetType, targetSlug)}/${encodeURIComponent(name)}`;
+
+  const response = await fetch(endpoint, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+
+  if (response.status === 404) {
+    return; // Already gone — idempotent delete
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `GitHub variable delete failed: ${response.status} ${response.statusText} — ${text}`
+    );
+  }
+}
+
 function webhookEndpoint(targetType: string, targetSlug: string): string {
   if (targetType === "org") {
     return `${GITHUB_API_BASE}/orgs/${encodeURIComponent(targetSlug)}/hooks`;
   }
   const [owner, repo] = targetSlug.split("/");
   return `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks`;
+}
+
+function variablesEndpoint(targetType: string, targetSlug: string): string {
+  if (targetType === "org") {
+    return `${GITHUB_API_BASE}/orgs/${encodeURIComponent(targetSlug)}/actions/variables`;
+  }
+  const [owner, repo] = targetSlug.split("/");
+  return `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/variables`;
 }

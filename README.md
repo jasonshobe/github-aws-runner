@@ -78,6 +78,8 @@ The `/github-aws-runner` prefix used in all parameter names is the default. It c
 | `/github-aws-runner/ami-owners` | String | Comma-separated AMI owner account IDs (default: `135269210855`) |
 | `/github-aws-runner/cache-bucket` | String | Name of the S3 bucket to create for runner caching; if set, the bucket is created and managed by the stack |
 | `/github-aws-runner/cache-expiration-days` | String | Days after which cached objects are deleted (default: `10`; only used when `cache-bucket` is set) |
+| `/github-aws-runner/oidc-role-policy-arn` | String | ARN of an existing managed IAM policy to attach to the OIDC role; setting this (along with `oidc-subject-pattern`) enables OIDC |
+| `/github-aws-runner/oidc-subject-pattern` | String | IAM trust policy subject claim pattern, e.g. `repo:myorg/*:*` or `repo:myorg/myrepo:*`; required when `oidc-role-policy-arn` is set |
 
 ### GitHub Token Permissions
 
@@ -88,6 +90,7 @@ The personal access token stored in `/github-aws-runner/github-token` must have:
 | Repository runners | `administration: write` (fine-grained) or `repo` (classic) |
 | Organization runners | `organization_self_hosted_runners: write` (fine-grained) or `admin:org` (classic) |
 | Webhook management | `admin:repo_hook` (repo) or `admin:org_hook` (org) |
+| OIDC variable management | `Variables` read/write (fine-grained) or `repo` / `admin:org` (classic, already required above) |
 
 ### Creating the parameters
 
@@ -422,6 +425,62 @@ aws ssm put-parameter \
 ```
 
 Both parameters require `cdk deploy` to take effect. Removing the `cache-bucket` parameter and redeploying will remove the stack's management of the bucket but the bucket itself is retained.
+
+### OIDC Authentication
+
+When both `oidc-role-policy-arn` and `oidc-subject-pattern` are set, the stack creates the AWS resources for GitHub Actions OIDC authentication and configures an `AWS_ROLE_ARN` Actions variable in your repository or organization so workflows can assume the role without long-lived credentials.
+
+**Step 1 — Create the IAM policy** with the permissions your workflows need (e.g. CodeArtifact, ECR, additional S3 buckets). The stack attaches this policy to the OIDC role; cache bucket access is already granted separately to the EC2 runner role.
+
+**Step 2 — Set the SSM parameters** and deploy:
+
+```bash
+# ARN of the managed policy to attach to the OIDC role
+aws ssm put-parameter \
+  --name /github-aws-runner/oidc-role-policy-arn \
+  --type String \
+  --value "arn:aws:iam::123456789012:policy/MyWorkflowPolicy"
+
+# Subject claim pattern — restricts which repos/branches can assume the role.
+# For all repos in an org:
+aws ssm put-parameter \
+  --name /github-aws-runner/oidc-subject-pattern \
+  --type String \
+  --value "repo:myorg/*:*"
+
+# Or restrict to a specific repository:
+aws ssm put-parameter \
+  --name /github-aws-runner/oidc-subject-pattern \
+  --type String \
+  --value "repo:myorg/myrepo:*"
+
+cdk deploy
+```
+
+After deployment, the `OidcRoleArn` stack output shows the role ARN and an `AWS_ROLE_ARN` Actions variable is set in your repository or organization.
+
+**Step 3 — Update workflows** to request an OIDC token and call `aws-actions/configure-aws-credentials`:
+
+```yaml
+permissions:
+  id-token: write   # required to request an OIDC token
+  contents: read
+
+steps:
+  - uses: actions/checkout@v4
+
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+      aws-region: <region>
+
+  # subsequent steps can now call AWS APIs using the assumed role
+  - uses: aws-actions/amazon-ecr-login@v2
+```
+
+The `id-token: write` permission must be declared in the workflow — it cannot be set programmatically.
+
+> **Note:** AWS IAM allows only one OIDC provider per URL per account. If another CloudFormation stack in the same account already manages the `https://token.actions.githubusercontent.com` provider, importing it is required. Replace the `new iam.OpenIdConnectProvider(...)` call in `lib/github-aws-runner-stack.ts` with `iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(this, "GithubOidcProvider", "<existing-arn>")`.
 
 ### Max Concurrent Runners
 
