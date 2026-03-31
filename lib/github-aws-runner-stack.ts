@@ -16,6 +16,7 @@ const SSM_TARGET_TYPE = "/github-aws-runner/target-type";
 const SSM_TARGET_SLUG = "/github-aws-runner/target-slug";
 const SSM_RUNNER_TIMEOUT = "/github-aws-runner/runner-timeout-minutes";
 const SSM_INSTANCE_TYPE = "/github-aws-runner/instance-type";
+const SSM_EBS_VOLUME_SIZE = "/github-aws-runner/ebs-volume-size-gb";
 
 export interface GithubAwsRunnerProps extends cdk.StackProps {
   /** GitHub webhook source CIDR blocks (from /meta API) used for initial resource policy */
@@ -103,6 +104,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         INSTANCE_PROFILE_ARN: instanceProfile.attrArn,
         AMI_ID: amiId,
         INSTANCE_TYPE_PARAM: SSM_INSTANCE_TYPE,
+        EBS_VOLUME_SIZE_PARAM: SSM_EBS_VOLUME_SIZE,
       },
     });
 
@@ -115,6 +117,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_TARGET_TYPE),
           ssmArn(this, SSM_TARGET_SLUG),
           ssmArn(this, SSM_INSTANCE_TYPE),
+          ssmArn(this, SSM_EBS_VOLUME_SIZE),
         ],
       })
     );

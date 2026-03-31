@@ -23,6 +23,7 @@ let cachedParams:
       targetType: string;
       targetSlug: string;
       instanceType: string;
+      ebsVolumeSizeGb: number;
     }
   | undefined;
 
@@ -43,6 +44,7 @@ async function getParams(): Promise<{
   targetType: string;
   targetSlug: string;
   instanceType: string;
+  ebsVolumeSizeGb: number;
 }> {
   if (cachedParams) return cachedParams;
   const result = await ssm.send(
@@ -52,6 +54,7 @@ async function getParams(): Promise<{
         process.env.TARGET_TYPE_PARAM!,
         process.env.TARGET_SLUG_PARAM!,
         process.env.INSTANCE_TYPE_PARAM!,
+        process.env.EBS_VOLUME_SIZE_PARAM!,
       ],
       WithDecryption: true,
     })
@@ -64,6 +67,7 @@ async function getParams(): Promise<{
     targetType: byName[process.env.TARGET_TYPE_PARAM!],
     targetSlug: byName[process.env.TARGET_SLUG_PARAM!],
     instanceType: byName[process.env.INSTANCE_TYPE_PARAM!],
+    ebsVolumeSizeGb: parseInt(byName[process.env.EBS_VOLUME_SIZE_PARAM!], 10),
   };
   return cachedParams;
 }
@@ -138,7 +142,7 @@ export async function handler(
   const jobId = payload.workflow_job.id;
   console.log(`Processing workflow_job.queued event for job ${jobId}`);
 
-  const { githubToken, targetType, targetSlug, instanceType } = await getParams();
+  const { githubToken, targetType, targetSlug, instanceType, ebsVolumeSizeGb } = await getParams();
 
   // Generate JIT runner config
   const { encodedJitConfig } = await generateJitConfig(
@@ -164,6 +168,12 @@ export async function handler(
       IamInstanceProfile: { Arn: process.env.INSTANCE_PROFILE_ARN! },
       UserData: buildUserData(encodedJitConfig),
       InstanceInitiatedShutdownBehavior: "terminate",
+      BlockDeviceMappings: [
+        {
+          DeviceName: "/dev/sda1",
+          Ebs: { VolumeSize: ebsVolumeSizeGb, VolumeType: "gp3", DeleteOnTermination: true },
+        },
+      ],
       TagSpecifications: [
         {
           ResourceType: ResourceType.instance,

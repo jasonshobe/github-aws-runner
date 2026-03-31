@@ -67,6 +67,7 @@ All configuration is stored in AWS Systems Manager Parameter Store. You must cre
 | `/github-aws-runner/target-slug` | String | `owner/repo` (for repo) or `myorg` (for org) |
 | `/github-aws-runner/runner-timeout-minutes` | String | Max runtime per runner in minutes (e.g. `60`) |
 | `/github-aws-runner/instance-type` | String | EC2 instance type for runners (e.g. `c7a.large`) |
+| `/github-aws-runner/ebs-volume-size-gb` | String | Root EBS volume size in GB (e.g. `80`) |
 
 ### Creating the parameters
 
@@ -116,6 +117,12 @@ aws ssm put-parameter \
   --name /github-aws-runner/instance-type \
   --type String \
   --value "c7a.large"
+
+# EBS volume size (GB)
+aws ssm put-parameter \
+  --name /github-aws-runner/ebs-volume-size-gb \
+  --type String \
+  --value "80"
 ```
 
 ## Deployment
