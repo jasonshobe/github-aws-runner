@@ -3,6 +3,7 @@ import {
   EC2Client,
   RunInstancesCommand,
   DescribeInstancesCommand,
+  DescribeImagesCommand,
   ResourceType,
 } from "@aws-sdk/client-ec2";
 import {
@@ -16,7 +17,11 @@ import { generateJitConfig } from "./github-client";
 const ec2 = new EC2Client({});
 const ssm = new SSMClient({});
 
-// Cached SSM values — populated on first invocation, reused on warm starts.
+const DEFAULT_AMI_NAME = "runs-on-v2.*-ubuntu22-full-x64-*";
+const DEFAULT_AMI_OWNERS = ["135269210855"];
+
+// Cached values — populated on first invocation, reused on warm starts.
+let cachedAmiId: string | undefined;
 let cachedWebhookSecret: string | undefined;
 let cachedParams:
   | {
@@ -32,6 +37,58 @@ let cachedParams:
       maxEbsVolumeSizeGb: number | undefined;
     }
   | undefined;
+
+async function resolveAmiId(): Promise<string> {
+  if (cachedAmiId) return cachedAmiId;
+
+  // Read optional SSM params; fall back to defaults if not set.
+  let amiName = DEFAULT_AMI_NAME;
+  let amiOwners = DEFAULT_AMI_OWNERS;
+
+  const paramNames = [
+    process.env.AMI_NAME_PARAM!,
+    process.env.AMI_OWNERS_PARAM!,
+  ].filter(Boolean);
+
+  if (paramNames.length > 0) {
+    const paramResult = await ssm.send(
+      new GetParametersCommand({ Names: paramNames })
+    );
+    const byName = Object.fromEntries(
+      (paramResult.Parameters ?? []).map((p: { Name?: string; Value?: string }) => [p.Name!, p.Value!])
+    );
+    if (byName[process.env.AMI_NAME_PARAM!]) {
+      amiName = byName[process.env.AMI_NAME_PARAM!];
+    }
+    if (byName[process.env.AMI_OWNERS_PARAM!]) {
+      amiOwners = byName[process.env.AMI_OWNERS_PARAM!].split(",").map((s) => s.trim()).filter(Boolean);
+    }
+  }
+
+  const imageResult = await ec2.send(
+    new DescribeImagesCommand({
+      Filters: [
+        { Name: "name", Values: [amiName] },
+        { Name: "state", Values: ["available"] },
+      ],
+      Owners: amiOwners,
+    })
+  );
+
+  const images = (imageResult.Images ?? []).sort((a, b) =>
+    (b.CreationDate ?? "").localeCompare(a.CreationDate ?? "")
+  );
+
+  if (images.length === 0) {
+    throw new Error(
+      `No AMI found matching name pattern "${amiName}" owned by ${amiOwners.join(", ")}`
+    );
+  }
+
+  cachedAmiId = images[0].ImageId!;
+  console.log(`Resolved AMI: ${cachedAmiId} (${images[0].Name})`);
+  return cachedAmiId;
+}
 
 async function getWebhookSecret(): Promise<string> {
   if (cachedWebhookSecret) return cachedWebhookSecret;
@@ -311,7 +368,7 @@ export async function handler(
 
   await ec2.send(
     new RunInstancesCommand({
-      ImageId: process.env.AMI_ID!,
+      ImageId: await resolveAmiId(),
       InstanceType: resolvedInstanceType as never,
       MinCount: 1,
       MaxCount: 1,

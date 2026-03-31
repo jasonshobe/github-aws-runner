@@ -5,13 +5,7 @@ import { GithubAwsRunnerStack } from "../lib/github-aws-runner-stack";
 const FAKE_WEBHOOK_IPS = ["140.82.112.0/20", "185.199.108.0/22"];
 
 function buildTemplate(): Template {
-  const app = new cdk.App({
-    context: {
-      // Suppress AMI lookup during tests
-      "ami:account=123456789012:filters.image-type.0=machine:filters.name.0=runs-on-v2.*-ubuntu22-full-x64-*:filters.state.0=available:owners.0=135269210855:region=us-east-1":
-        "ami-0123456789abcdef0",
-    },
-  });
+  const app = new cdk.App();
   const stack = new GithubAwsRunnerStack(app, "TestStack", {
     initialWebhookIps: FAKE_WEBHOOK_IPS,
     env: { account: "123456789012", region: "us-east-1" },
@@ -106,7 +100,8 @@ describe("GithubAwsRunnerStack", () => {
           WEBHOOK_SECRET_PARAM: "/github-aws-runner/webhook-secret",
           TARGET_TYPE_PARAM: "/github-aws-runner/target-type",
           TARGET_SLUG_PARAM: "/github-aws-runner/target-slug",
-          AMI_ID: "ami-0123456789abcdef0",
+          AMI_NAME_PARAM: "/github-aws-runner/ami-name",
+          AMI_OWNERS_PARAM: "/github-aws-runner/ami-owners",
         }),
       }),
     });

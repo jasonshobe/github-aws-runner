@@ -77,6 +77,8 @@ The `/github-aws-runner` prefix used in all parameter names is the default. It c
 | `/github-aws-runner/allowed-instance-types` | String | Comma-separated list of instance types workflows may request (optional) |
 | `/github-aws-runner/max-ebs-volume-size-gb` | String | Upper bound on the EBS volume size workflows may request in GB (optional) |
 | `/github-aws-runner/ip-updater-interval-hours` | String | How often the IP updater runs in hours (e.g. `12`); requires `cdk deploy` to take effect |
+| `/github-aws-runner/ami-name` | String | AMI name pattern to search for (optional, default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
+| `/github-aws-runner/ami-owners` | String | Comma-separated list of AMI owner account IDs (optional, default: `135269210855`) |
 
 ### Creating the parameters
 
@@ -300,6 +302,58 @@ aws ssm put-parameter \
   --name /github-aws-runner/max-ebs-volume-size-gb \
   --type String \
   --value "500"
+```
+
+### AMI
+
+The webhook Lambda resolves the latest matching AMI at runtime on each cold start. By default it searches for the [RunsOn](https://runs-on.com) runner image:
+
+- Name pattern: `runs-on-v2.*-ubuntu22-full-x64-*`
+- Owner account: `135269210855`
+
+To use a different image, set one or both optional SSM parameters:
+
+```bash
+# Use a custom AMI name pattern
+aws ssm put-parameter \
+  --name /github-aws-runner/ami-name \
+  --type String \
+  --value "my-runner-image-*"
+
+# Use a different owner (your own account, or a share source account)
+aws ssm put-parameter \
+  --name /github-aws-runner/ami-owners \
+  --type String \
+  --value "self"
+```
+
+Changes take effect on the next Lambda cold start — no redeployment required.
+
+#### Private AMIs
+
+No additional configuration is needed for private AMIs shared with your account (unencrypted, or encrypted with an AWS-managed key). The Lambda role already has `ec2:DescribeImages` and `ec2:RunInstances`.
+
+If the AMI's snapshots are encrypted with a **customer-managed KMS key (CMK)**, EC2 requires the launching principal to create a key grant. Add a policy statement to the webhook Lambda's role granting access to the CMK:
+
+```bash
+# Find the role name in the CloudFormation stack resources
+aws cloudformation describe-stack-resources \
+  --stack-name GithubAwsRunnerStack \
+  --query 'StackResources[?ResourceType==`AWS::IAM::Role` && contains(LogicalResourceId, `WebhookFn`)].PhysicalResourceId' \
+  --output text
+
+# Attach an inline policy granting the required KMS permissions
+aws iam put-role-policy \
+  --role-name <webhook-role-name> \
+  --policy-name AllowRunnerAmiKmsKey \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["kms:CreateGrant", "kms:Decrypt", "kms:DescribeKey"],
+      "Resource": "arn:aws:kms:<region>:<account>:key/<key-id>"
+    }]
+  }'
 ```
 
 ### Runner Label

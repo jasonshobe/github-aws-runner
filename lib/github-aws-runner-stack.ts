@@ -40,6 +40,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_ALLOWED_INSTANCE_TYPES   = `${p}/allowed-instance-types`;
     const SSM_MAX_EBS_VOLUME_SIZE      = `${p}/max-ebs-volume-size-gb`;
     const SSM_IP_UPDATER_INTERVAL      = `${p}/ip-updater-interval-hours`;
+    const SSM_AMI_NAME                 = `${p}/ami-name`;
+    const SSM_AMI_OWNERS               = `${p}/ami-owners`;
 
     // -------------------------------------------------------------------------
     // VPC — single public subnet, no NAT Gateway
@@ -89,15 +91,6 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     );
 
     // -------------------------------------------------------------------------
-    // AMI — RunsOn runner image resolved at synth time
-    // -------------------------------------------------------------------------
-    const runnerAmi = ec2.MachineImage.lookup({
-      name: "runs-on-v2.*-ubuntu22-full-x64-*",
-      owners: ["135269210855"],
-    });
-    const amiId = runnerAmi.getImage(this).imageId;
-
-    // -------------------------------------------------------------------------
     // Max concurrent runners — read at synth time for Lambda reserved concurrency;
     // also passed to the Lambda for the runtime EC2 cap check.
     // Requires cdk deploy to pick up SSM changes.
@@ -145,7 +138,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         SUBNET_ID: vpc.publicSubnets[0].subnetId,
         SECURITY_GROUP_ID: runnerSecurityGroup.securityGroupId,
         INSTANCE_PROFILE_ARN: instanceProfile.attrArn,
-        AMI_ID: amiId,
+        AMI_NAME_PARAM: SSM_AMI_NAME,
+        AMI_OWNERS_PARAM: SSM_AMI_OWNERS,
         INSTANCE_TYPE_PARAM: SSM_INSTANCE_TYPE,
         EBS_VOLUME_SIZE_PARAM: SSM_EBS_VOLUME_SIZE,
         MAX_CONCURRENT_RUNNERS_PARAM: SSM_MAX_CONCURRENT_RUNNERS,
@@ -171,7 +165,17 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_ALLOWED_INSTANCE_TYPES),
           ssmArn(this, SSM_MAX_EBS_VOLUME_SIZE),
           ssmArn(this, SSM_RUNNER_TIMEOUT),
+          ssmArn(this, SSM_AMI_NAME),
+          ssmArn(this, SSM_AMI_OWNERS),
         ],
+      })
+    );
+
+    // Needed to resolve the latest matching AMI at runtime.
+    webhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:DescribeImages"],
+        resources: ["*"],
       })
     );
 
