@@ -217,7 +217,7 @@ jobs:
 
 Jobs that do not include the required additional label are ignored and will not trigger a runner launch.
 
-Workflows can also request a specific EC2 instance type or disk size using labels. The instance type must be in the `/github-aws-runner/allowed-instance-types` list and the disk size may not exceed `/github-aws-runner/max-ebs-volume-size-gb`. If either SSM parameter is not configured, the corresponding label is ignored and the SSM default is used.
+Workflows can also request a specific EC2 instance type, disk size, or timeout using labels. The instance type must be in the `/github-aws-runner/allowed-instance-types` list and the disk size may not exceed `/github-aws-runner/max-ebs-volume-size-gb`. The timeout may not exceed `/github-aws-runner/runner-timeout-minutes`. If the instance type or disk size SSM parameter is not configured, the corresponding label is ignored and the SSM default is used.
 
 ```yaml
 jobs:
@@ -227,6 +227,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: echo "Running on a large ephemeral AWS runner"
+
+  short-lived:
+    # Request a shorter timeout (in minutes) than the SSM default
+    runs-on: [self-hosted, timeout:15]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Runner will be terminated if still running after 15 minutes"
 ```
 
 The runner is provisioned automatically when the job is queued and terminated when it completes.

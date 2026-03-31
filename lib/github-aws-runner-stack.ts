@@ -151,6 +151,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         RUNNER_LABEL_PARAM: SSM_RUNNER_LABEL,
         ALLOWED_INSTANCE_TYPES_PARAM: SSM_ALLOWED_INSTANCE_TYPES,
         MAX_EBS_VOLUME_SIZE_PARAM: SSM_MAX_EBS_VOLUME_SIZE,
+        RUNNER_TIMEOUT_PARAM: SSM_RUNNER_TIMEOUT,
       },
     });
 
@@ -168,6 +169,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_RUNNER_LABEL),
           ssmArn(this, SSM_ALLOWED_INSTANCE_TYPES),
           ssmArn(this, SSM_MAX_EBS_VOLUME_SIZE),
+          ssmArn(this, SSM_RUNNER_TIMEOUT),
         ],
       })
     );

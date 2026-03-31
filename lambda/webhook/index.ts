@@ -26,6 +26,7 @@ let cachedParams:
       instanceType: string;
       ebsVolumeSizeGb: number;
       maxConcurrentRunners: number;
+      runnerTimeoutMinutes: number;
       runnerLabel: string | undefined;
       allowedInstanceTypes: string[] | undefined;
       maxEbsVolumeSizeGb: number | undefined;
@@ -51,6 +52,7 @@ async function getParams(): Promise<{
   instanceType: string;
   ebsVolumeSizeGb: number;
   maxConcurrentRunners: number;
+  runnerTimeoutMinutes: number;
   runnerLabel: string | undefined;
   allowedInstanceTypes: string[] | undefined;
   maxEbsVolumeSizeGb: number | undefined;
@@ -65,6 +67,7 @@ async function getParams(): Promise<{
         process.env.INSTANCE_TYPE_PARAM!,
         process.env.EBS_VOLUME_SIZE_PARAM!,
         process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
+        process.env.RUNNER_TIMEOUT_PARAM!,
         process.env.RUNNER_LABEL_PARAM!,
         process.env.ALLOWED_INSTANCE_TYPES_PARAM!,
         process.env.MAX_EBS_VOLUME_SIZE_PARAM!,
@@ -84,6 +87,7 @@ async function getParams(): Promise<{
     instanceType: byName[process.env.INSTANCE_TYPE_PARAM!],
     ebsVolumeSizeGb: parseInt(byName[process.env.EBS_VOLUME_SIZE_PARAM!], 10),
     maxConcurrentRunners: parseInt(byName[process.env.MAX_CONCURRENT_RUNNERS_PARAM!], 10),
+    runnerTimeoutMinutes: parseInt(byName[process.env.RUNNER_TIMEOUT_PARAM!], 10),
     // Optional — omitted from byName if the SSM parameter does not exist
     runnerLabel: byName[process.env.RUNNER_LABEL_PARAM!],
     allowedInstanceTypes: allowedRaw
@@ -140,6 +144,25 @@ function resolveInstanceType(
     return defaultType;
   }
   return labelValue;
+}
+
+function resolveTimeout(
+  labels: string[],
+  defaultTimeout: number,
+  maxTimeout: number
+): number {
+  const labelValue = parseLabelValue(labels, "timeout");
+  if (!labelValue) return defaultTimeout;
+  const parsed = parseInt(labelValue, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    console.warn(`timeout label "${labelValue}" is not a valid number, using default ${defaultTimeout}m`);
+    return defaultTimeout;
+  }
+  if (parsed > maxTimeout) {
+    console.warn(`timeout label ${parsed}m exceeds max ${maxTimeout}m, capping`);
+    return maxTimeout;
+  }
+  return parsed;
 }
 
 function resolveEbsSize(
@@ -233,8 +256,8 @@ export async function handler(
   const {
     githubToken, targetType, targetSlug,
     instanceType, ebsVolumeSizeGb,
-    maxConcurrentRunners, runnerLabel,
-    allowedInstanceTypes, maxEbsVolumeSizeGb,
+    maxConcurrentRunners, runnerTimeoutMinutes,
+    runnerLabel, allowedInstanceTypes, maxEbsVolumeSizeGb,
   } = await getParams();
 
   if (runnerLabel && !payload.workflow_job.labels.includes(runnerLabel)) {
@@ -242,7 +265,7 @@ export async function handler(
     return { statusCode: 200, body: "OK" };
   }
 
-  // Resolve instance type and EBS size from labels (with SSM defaults and constraints)
+  // Resolve instance type, EBS size, and timeout from labels (with SSM defaults and constraints)
   const resolvedInstanceType = resolveInstanceType(
     payload.workflow_job.labels,
     instanceType,
@@ -253,10 +276,15 @@ export async function handler(
     ebsVolumeSizeGb,
     maxEbsVolumeSizeGb
   );
+  const resolvedTimeoutMinutes = resolveTimeout(
+    payload.workflow_job.labels,
+    runnerTimeoutMinutes,
+    runnerTimeoutMinutes
+  );
 
   console.log(
     `Processing workflow_job.queued event for job ${jobId} ` +
-    `(instance-type=${resolvedInstanceType}, disk=${resolvedEbsSize}GB)`
+    `(instance-type=${resolvedInstanceType}, disk=${resolvedEbsSize}GB, timeout=${resolvedTimeoutMinutes}m)`
   );
 
   // Enforce concurrent runner cap before launching
@@ -306,6 +334,7 @@ export async function handler(
             { Key: "github-aws-runner:managed", Value: "true" },
             { Key: "github-aws-runner:launch-time", Value: launchTime },
             { Key: "github-aws-runner:job-id", Value: String(jobId) },
+            { Key: "github-aws-runner:timeout-minutes", Value: String(resolvedTimeoutMinutes) },
           ],
         },
       ],

@@ -49,12 +49,19 @@ export async function handler(): Promise<void> {
           );
           continue;
         }
+        const timeoutTag = instance.Tags?.find(
+          (t) => t.Key === "github-aws-runner:timeout-minutes"
+        );
+        const instanceTimeoutMinutes = timeoutTag?.Value
+          ? Math.min(parseInt(timeoutTag.Value, 10), timeoutMinutes)
+          : timeoutMinutes;
+        const instanceTimeoutMs = instanceTimeoutMinutes * 60 * 1000;
         const launchTime = new Date(launchTag.Value).getTime();
         const ageMs = now - launchTime;
-        if (ageMs > timeoutMs) {
+        if (ageMs > instanceTimeoutMs) {
           const ageMinutes = Math.floor(ageMs / 60000);
           console.log(
-            `Instance ${instance.InstanceId} is ${ageMinutes}m old (limit ${timeoutMinutes}m) — marking for termination`
+            `Instance ${instance.InstanceId} is ${ageMinutes}m old (limit ${instanceTimeoutMinutes}m) — marking for termination`
           );
           staleInstanceIds.push(instance.InstanceId!);
         }
