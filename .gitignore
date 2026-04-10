@@ -8,5 +8,10 @@ dist
 .cdk.staging
 cdk.out
 
+cdk.context.json
+
 # Local Claude Code settings (may contain personal permission rules)
 .claude/settings.local.json
+
+# Local Codex settings
+.codex

@@ -50,7 +50,6 @@ CDK deploy/destroy (when oidc-role-policy-arn and oidc-subject-pattern are set)
 
 - [Node.js](https://nodejs.org/) 22.x or later
 - [AWS CLI](https://aws.amazon.com/cli/) configured with credentials for your target account
-- [AWS CDK](https://docs.aws.amazon.com/cdk/latest/guide/cli.html) v2 (`npm install -g aws-cdk`)
 - A GitHub personal access token with the required scopes (see below)
 
 ## SSM Parameters
@@ -76,12 +75,14 @@ The `/github-aws-runner` prefix used in all parameter names is the default. It c
 
 ### Optional parameters
 
+These parameters do not need to exist in SSM unless you want to override the documented default behavior.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `/github-aws-runner/runner-label` | String | Additional label required on jobs beyond `self-hosted` |
 | `/github-aws-runner/allowed-instance-types` | String | Comma-separated list of instance types workflows may request via label |
 | `/github-aws-runner/max-ebs-volume-size-gb` | String | Upper bound on the EBS volume size workflows may request in GB |
-| `/github-aws-runner/ip-updater-interval-hours` | String | IP updater schedule in hours (default: `12`); requires `cdk deploy` to take effect |
+| `/github-aws-runner/ip-updater-interval-hours` | String | IP updater schedule in hours (default: `12`); if omitted, deploy uses `12`; requires `npx cdk deploy` to take effect |
 | `/github-aws-runner/ami-name` | String | AMI name pattern (default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
 | `/github-aws-runner/ami-owners` | String | Comma-separated AMI owner account IDs (default: `135269210855`) |
 | `/github-aws-runner/cache-bucket` | String | Name of the S3 bucket to create for runner caching; if set, the bucket is created and managed by the stack |
@@ -184,19 +185,19 @@ aws ssm put-parameter \
 2. Bootstrap CDK (first-time only per account/region):
 
    ```bash
-   cdk bootstrap
+   npx cdk bootstrap
    ```
 
 3. Deploy:
 
    ```bash
-   cdk deploy
+   npx cdk deploy
    ```
 
    To use a custom SSM parameter prefix instead of `/github-aws-runner`, pass the `ssmPrefix` context variable. All SSM parameters must be created under the same prefix.
 
    ```bash
-   cdk deploy --context ssmPrefix=/my-runner
+   npx cdk deploy --context ssmPrefix=/my-runner
    ```
 
    The stack will:
@@ -287,7 +288,7 @@ If you prefer to manage the bucket yourself, omit the SSM parameter and set `RUN
 
 ## Configuration
 
-Most SSM parameters take effect immediately without redeploying the stack. The following require a `cdk deploy` because they are resolved at synth time:
+Most SSM parameters take effect immediately without redeploying the stack. The following require an `npx cdk deploy` because they are resolved at synth time:
 
 - **max-concurrent-runners** — also controls Lambda reserved concurrency
 - **api-throttle-rate-limit** and **api-throttle-burst-limit** — control API Gateway stage throttling
@@ -421,7 +422,7 @@ aws ssm put-parameter \
   --value "my-runner-cache-bucket"
 ```
 
-Then run `cdk deploy`. The stack will create the bucket if it does not already exist, apply a lifecycle policy, grant the runner EC2 instances access, and automatically inject the bucket name into every runner's environment. If the bucket already exists in your account it will be adopted and the lifecycle policy applied to it.
+Then run `npx cdk deploy`. The stack will create the bucket if it does not already exist, apply a lifecycle policy, grant the runner EC2 instances access, and automatically inject the bucket name into every runner's environment. If the bucket already exists in your account it will be adopted and the lifecycle policy applied to it.
 
 The default expiration is 10 days. To use a different value:
 
@@ -432,7 +433,7 @@ aws ssm put-parameter \
   --value "7"
 ```
 
-Both parameters require `cdk deploy` to take effect. Removing the `cache-bucket` parameter and redeploying will remove the stack's management of the bucket but the bucket itself is retained.
+Both parameters require `npx cdk deploy` to take effect. Removing the `cache-bucket` parameter and redeploying will remove the stack's management of the bucket but the bucket itself is retained.
 
 ### OIDC Authentication
 
@@ -462,7 +463,7 @@ aws ssm put-parameter \
   --type String \
   --value "repo:myorg/myrepo:*"
 
-cdk deploy
+npx cdk deploy
 ```
 
 After deployment, the `OidcRoleArn` stack output shows the role ARN and an `AWS_ROLE_ARN` Actions variable is set in your repository or organization.
@@ -492,7 +493,7 @@ The `id-token: write` permission must be declared in the workflow — it cannot 
 
 ### Max Concurrent Runners
 
-Update the `/github-aws-runner/max-concurrent-runners` parameter, then run `cdk deploy`:
+Update the `/github-aws-runner/max-concurrent-runners` parameter, then run `npx cdk deploy`:
 
 ```bash
 aws ssm put-parameter \
@@ -501,12 +502,12 @@ aws ssm put-parameter \
   --value "10" \
   --overwrite
 
-cdk deploy
+npx cdk deploy
 ```
 
 ### API Gateway Throttling
 
-Update the rate and burst parameters, then run `cdk deploy`:
+Update the rate and burst parameters, then run `npx cdk deploy`:
 
 ```bash
 aws ssm put-parameter \
@@ -521,7 +522,7 @@ aws ssm put-parameter \
   --value "10" \
   --overwrite
 
-cdk deploy
+npx cdk deploy
 ```
 
 ### IP Updater
@@ -548,7 +549,7 @@ aws ssm put-parameter \
   --value "6" \
   --overwrite
 
-cdk deploy
+npx cdk deploy
 ```
 
 ## Cost Protection
@@ -574,7 +575,7 @@ Cost Anomaly Detection identifies unusual spending patterns beyond simple thresh
 ## Teardown
 
 ```bash
-cdk destroy
+npx cdk destroy
 ```
 
 This will delete all AWS resources and deregister the GitHub webhook.
@@ -589,7 +590,7 @@ npx tsc --noEmit
 npm test
 
 # Synthesize CloudFormation template (requires AWS credentials for context lookups)
-cdk synth
+npx cdk synth
 ```
 
 ## License

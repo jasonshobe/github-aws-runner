@@ -46,6 +46,9 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_CACHE_EXPIRATION_DAYS    = `${p}/cache-expiration-days`;
     const SSM_OIDC_ROLE_POLICY_ARN     = `${p}/oidc-role-policy-arn`;
     const SSM_OIDC_SUBJECT_PATTERN     = `${p}/oidc-subject-pattern`;
+    const lambdaExternalModules = ["@aws-sdk/*"];
+    const optionalLookup = (parameterName: string, defaultValue = "") =>
+      ssm.StringParameter.valueFromLookup(this, parameterName, defaultValue);
 
     // -------------------------------------------------------------------------
     // VPC — single public subnet, no NAT Gateway
@@ -66,6 +69,22 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       vpc,
       description: "Security group for GitHub Actions runner EC2 instances",
       allowAllOutbound: true,
+    });
+
+    // API Gateway stage access logging requires an account-level CloudWatch
+    // Logs role to be configured before the stage is created.
+    const apiGatewayCloudWatchRole = new iam.Role(this, "ApiGatewayCloudWatchRole", {
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          "service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+        ),
+      ],
+      description: "Account-level CloudWatch Logs role for API Gateway access logging",
+    });
+
+    const apiGatewayAccount = new apigateway.CfnAccount(this, "ApiGatewayAccount", {
+      cloudWatchRoleArn: apiGatewayCloudWatchRole.roleArn,
     });
 
     // -------------------------------------------------------------------------
@@ -125,13 +144,13 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     // Cache bucket — optional. valueFromLookup returns a dummy string containing
     // forward-slashes when the parameter is absent; those are not valid in S3
     // bucket names, so the regex reliably detects "not configured".
-    const cacheBucketRaw = ssm.StringParameter.valueFromLookup(this, SSM_CACHE_BUCKET);
+    const cacheBucketRaw = optionalLookup(SSM_CACHE_BUCKET);
     const cacheBucketName = /^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$/.test(cacheBucketRaw)
       ? cacheBucketRaw
       : undefined;
 
     const cacheExpirationDaysRaw = parseInt(
-      ssm.StringParameter.valueFromLookup(this, SSM_CACHE_EXPIRATION_DAYS),
+      optionalLookup(SSM_CACHE_EXPIRATION_DAYS, "10"),
       10
     );
     const cacheExpirationDays = Number.isNaN(cacheExpirationDaysRaw) ? 10 : cacheExpirationDaysRaw;
@@ -139,12 +158,12 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     // OIDC — both parameters must be set together. Policy ARN is detected by
     // the leading "arn:aws:iam::" prefix; subject pattern by absence of the
     // CDK dummy-value prefix. If either is missing the block is skipped.
-    const oidcPolicyArnRaw = ssm.StringParameter.valueFromLookup(this, SSM_OIDC_ROLE_POLICY_ARN);
+    const oidcPolicyArnRaw = optionalLookup(SSM_OIDC_ROLE_POLICY_ARN);
     const oidcPolicyArn = oidcPolicyArnRaw.startsWith("arn:aws:iam::")
       ? oidcPolicyArnRaw
       : undefined;
 
-    const oidcSubjectPatternRaw = ssm.StringParameter.valueFromLookup(this, SSM_OIDC_SUBJECT_PATTERN);
+    const oidcSubjectPatternRaw = optionalLookup(SSM_OIDC_SUBJECT_PATTERN);
     const oidcSubjectPattern =
       oidcPolicyArn !== undefined && !oidcSubjectPatternRaw.startsWith("dummy-value-for-")
         ? oidcSubjectPatternRaw
@@ -160,7 +179,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: reservedConcurrency,
       bundling: {
-        externalModules: [],
+        externalModules: lambdaExternalModules,
       },
       environment: {
         GITHUB_TOKEN_PARAM: SSM_GITHUB_TOKEN,
@@ -278,6 +297,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       "POST",
       new apigateway.LambdaIntegration(webhookFn)
     );
+    api.deploymentStage.node.addDependency(apiGatewayAccount);
 
     // -------------------------------------------------------------------------
     // Lambda: IP updater
@@ -288,7 +308,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       handler: "handler",
       timeout: cdk.Duration.minutes(1),
       bundling: {
-        externalModules: [],
+        externalModules: lambdaExternalModules,
       },
       environment: {
         REST_API_ID: api.restApiId,
@@ -306,7 +326,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     );
 
     const ipUpdaterIntervalHours = parseInt(
-      ssm.StringParameter.valueFromLookup(this, SSM_IP_UPDATER_INTERVAL),
+      optionalLookup(SSM_IP_UPDATER_INTERVAL, "12"),
       10
     );
 
@@ -326,7 +346,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       handler: "handler",
       timeout: cdk.Duration.minutes(5),
       bundling: {
-        externalModules: [],
+        externalModules: lambdaExternalModules,
       },
       environment: {
         RUNNER_TIMEOUT_PARAM: SSM_RUNNER_TIMEOUT,
@@ -376,7 +396,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         handler: "handler",
         timeout: cdk.Duration.minutes(5),
         bundling: {
-          externalModules: [],
+          externalModules: lambdaExternalModules,
         },
       }
     );
@@ -419,7 +439,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         handler: "handler",
         timeout: cdk.Duration.minutes(1),
         bundling: {
-          externalModules: [],
+          externalModules: lambdaExternalModules,
         },
       });
 
@@ -510,7 +530,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         handler: "handler",
         timeout: cdk.Duration.minutes(1),
         bundling: {
-          externalModules: [],
+          externalModules: lambdaExternalModules,
         },
       });
 

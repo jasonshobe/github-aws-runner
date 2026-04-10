@@ -54,6 +54,24 @@ describe("GithubAwsRunnerStack", () => {
     });
   });
 
+  test("configures the API Gateway CloudWatch Logs role required for access logs", () => {
+    template.hasResourceProperties("AWS::IAM::Role", {
+      AssumeRolePolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Principal: { Service: "apigateway.amazonaws.com" },
+            Action: "sts:AssumeRole",
+          }),
+        ]),
+      }),
+      ManagedPolicyArns: Match.anyValue(),
+    });
+
+    template.hasResourceProperties("AWS::ApiGateway::Account", {
+      CloudWatchRoleArn: Match.anyValue(),
+    });
+  });
+
   test("REST API has a resource policy denying non-GitHub IPs", () => {
     template.hasResourceProperties("AWS::ApiGateway::RestApi", {
       Policy: Match.objectLike({
