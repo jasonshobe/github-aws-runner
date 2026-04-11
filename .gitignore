@@ -15,3 +15,5 @@ cdk.context.json
 
 # Local Codex settings
 .codex
+
+/.idea/
