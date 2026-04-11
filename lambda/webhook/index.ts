@@ -256,16 +256,51 @@ function verifySignature(secret: string, body: string, header: string): boolean 
   }
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function buildUserData(encodedJitConfig: string, cacheBucket?: string): string {
   const cacheEnv = cacheBucket
-    ? `export RUNS_ON_S3_BUCKET_CACHE="${cacheBucket}"\n`
+    ? `export RUNS_ON_S3_BUCKET_CACHE=${shellQuote(cacheBucket)}\n`
     : "";
   const script = `#!/bin/bash
-set -euxo pipefail
-JIT_CONFIG="${encodedJitConfig}"
-${cacheEnv}cd /home/runner/actions-runner
-./run.sh --jitconfig "\${JIT_CONFIG}"
-shutdown -h now
+set -euo pipefail
+
+exec > >(tee -a /var/log/github-aws-runner-user-data.log | logger -t github-aws-runner-user-data -s 2>/dev/console) 2>&1
+
+shutdown_on_exit() {
+  local status=$?
+  echo "Runner bootstrap exiting with status \${status}"
+  shutdown -h now
+}
+trap shutdown_on_exit EXIT
+
+JIT_CONFIG=${shellQuote(encodedJitConfig)}
+${cacheEnv}
+if ! id -u runner >/dev/null 2>&1; then
+  useradd --create-home --shell /bin/bash runner
+fi
+
+install -d -o runner -g runner /home/runner/actions-runner
+cd /home/runner/actions-runner
+
+if [ ! -x ./run.sh ]; then
+  RUNNER_VERSION="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | sed -n 's/.*"tag_name": "v\\([^"]*\\)".*/\\1/p' | head -n 1)"
+  if [ -z "\${RUNNER_VERSION}" ]; then
+    echo "Unable to determine latest GitHub Actions runner version"
+    exit 1
+  fi
+
+  curl -fsSL \
+    -o actions-runner.tar.gz \
+    "https://github.com/actions/runner/releases/download/v\${RUNNER_VERSION}/actions-runner-linux-x64-\${RUNNER_VERSION}.tar.gz"
+  tar xzf actions-runner.tar.gz
+  rm actions-runner.tar.gz
+  chown -R runner:runner /home/runner/actions-runner
+fi
+
+sudo -E -u runner ./run.sh --jitconfig "\${JIT_CONFIG}"
 `;
   return Buffer.from(script).toString("base64");
 }

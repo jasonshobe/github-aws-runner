@@ -124,4 +124,32 @@ describe("GithubAwsRunnerStack", () => {
       }),
     });
   });
+
+  test("allows webhook Lambda to launch tagged instances with required supporting EC2 resources", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "ec2:RunInstances",
+            Resource: "arn:aws:ec2:us-east-1:123456789012:instance/*",
+            Condition: {
+              StringEquals: {
+                "aws:RequestTag/github-aws-runner:managed": "true",
+              },
+            },
+          }),
+          Match.objectLike({
+            Action: "ec2:RunInstances",
+            Resource: Match.arrayWith([
+              "arn:aws:ec2:us-east-1::image/*",
+              "arn:aws:ec2:us-east-1:123456789012:network-interface/*",
+              "arn:aws:ec2:us-east-1:123456789012:security-group/*",
+              "arn:aws:ec2:us-east-1:123456789012:subnet/*",
+              "arn:aws:ec2:us-east-1:123456789012:volume/*",
+            ]),
+          }),
+        ]),
+      },
+    });
+  });
 });

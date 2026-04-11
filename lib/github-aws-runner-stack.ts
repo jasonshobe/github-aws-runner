@@ -230,17 +230,34 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       })
     );
 
-    // RunInstances is allowed only when the request includes the managed tag,
-    // preventing the Lambda role from launching untagged instances.
+    // RunInstances authorization is evaluated against each referenced EC2
+    // resource. The managed tag condition only applies to the instance being
+    // created, not supporting resources such as the subnet, security group,
+    // network interface, AMI, or root volume.
     webhookFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ec2:RunInstances"],
-        resources: ["*"],
+        resources: [
+          `arn:aws:ec2:${this.region}:${this.account}:instance/*`,
+        ],
         conditions: {
           StringEquals: {
             "aws:RequestTag/github-aws-runner:managed": "true",
           },
         },
+      })
+    );
+
+    webhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:RunInstances"],
+        resources: [
+          `arn:aws:ec2:${this.region}::image/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:network-interface/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:security-group/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:subnet/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:volume/*`,
+        ],
       })
     );
 
