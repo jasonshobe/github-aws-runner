@@ -282,6 +282,12 @@ if ! id -u runner >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash runner
 fi
 
+if getent group docker >/dev/null 2>&1; then
+  usermod -aG docker runner
+else
+  echo "Docker group does not exist; workflows that use Docker may need an AMI with Docker installed"
+fi
+
 install -d -o runner -g runner /home/runner/actions-runner
 cd /home/runner/actions-runner
 
