@@ -23,9 +23,10 @@ This is a CDK TypeScript project that provisions on-demand ephemeral GitHub Acti
 1. GitHub sends a `workflow_job` webhook → API Gateway (POST /webhook) → **Webhook Lambda**
 2. Webhook Lambda validates the HMAC signature, checks runner labels and concurrency limits, calls the GitHub API to generate a JIT runner config, and launches an EC2 instance
 3. The EC2 instance runs the GitHub Actions runner via user data, then self-terminates on completion (`InstanceInitiatedShutdownBehavior: terminate`)
-4. **Watchdog Lambda** runs every 15 minutes via EventBridge to terminate any instance that has exceeded its timeout
-5. **IP Updater Lambda** runs on a configurable schedule (default: every 12 hours) to refresh the API Gateway resource policy with current GitHub webhook CIDR blocks from `https://api.github.com/meta`
-6. Three **Custom Resource Lambdas** manage GitHub/AWS state during CloudFormation lifecycle events: webhook registration, S3 cache bucket creation (conditional), and GitHub OIDC variable configuration (conditional)
+4. **Reconciler Lambda** runs every 2 minutes (configurable) to top up runner capacity for jobs still waiting in the queued-jobs table and to prune dead runner registrations
+5. **Watchdog Lambda** runs every 15 minutes via EventBridge to terminate any instance that has exceeded its timeout
+6. **IP Updater Lambda** runs on a configurable schedule (default: every 12 hours) to refresh the API Gateway resource policy with current GitHub webhook CIDR blocks from `https://api.github.com/meta`
+7. Three **Custom Resource Lambdas** manage GitHub/AWS state during CloudFormation lifecycle events: webhook registration, S3 cache bucket creation (conditional), and GitHub OIDC variable configuration (conditional)
 
 ### Key Design Decisions
 
@@ -33,6 +34,7 @@ This is a CDK TypeScript project that provisions on-demand ephemeral GitHub Acti
 - `max-concurrent-runners` — Lambda reserved concurrency
 - `api-throttle-rate-limit` / `api-throttle-burst-limit` — API Gateway stage throttling
 - `ip-updater-interval-hours` — EventBridge schedule rate
+- `reconciler-interval-minutes` — EventBridge schedule rate for the reconciler
 - `cache-bucket` / `cache-expiration-days` — whether to create the S3 cache bucket and its lifecycle policy
 - `oidc-role-policy-arn` / `oidc-subject-pattern` — whether to create OIDC infrastructure and the trust policy subject
 
@@ -42,7 +44,15 @@ This is a CDK TypeScript project that provisions on-demand ephemeral GitHub Acti
 
 **IP policy update failures are non-fatal**: The IP Updater Lambda catches errors from the API Gateway PATCH call and logs them without rethrowing, so the previous policy remains active if the update fails.
 
-**EC2 instance tagging for concurrency and timeout**: The Webhook Lambda tags launched instances with `github-aws-runner:managed=true`, `github-aws-runner:launch-time`, and `github-aws-runner:timeout-minutes`. The Watchdog uses `DescribeInstances` filtered by those tags to find and time out stale runners. The Webhook Lambda counts running instances by the same tag to enforce `max-concurrent-runners`.
+**JIT runners are fungible — the reconciler, not the webhook, guarantees capacity**: Every JIT runner is minted with the same label set (`self-hosted`, `linux`, `x64`), so GitHub does **not** bind a runner to the job whose webhook launched it. When a runner comes online GitHub hands it the *oldest* matching queued job in the target; the `aws-runner-<jobId>` name is cosmetic. A strict "one webhook, one instance" scheme therefore only holds while runner supply exactly equals job demand, and any minted runner that never picks up a job (instance failed to bootstrap, reaped while idle) permanently shifts the queue so the newest job starves in `queued` indefinitely.
+
+To close that gap the Webhook Lambda records every `workflow_job.queued` event in the **queued-jobs DynamoDB table** and deletes the row on `workflow_job.in_progress` or `workflow_job.completed` (a TTL on `expiresAt` is only a leak backstop). The **Reconciler Lambda** then compares rows older than `reconciler-grace-seconds` against runner capacity actually in flight — `pending`/`running` managed instances minus runners GitHub reports as `busy` — and launches the shortfall, capped by `max-concurrent-runners`. All decision logic is pure and lives in `lambda/reconciler/planner.ts`.
+
+Because the reconciler covers the backlog, the Webhook Lambda returns 200 rather than 503 when the concurrency cap is hit: the row stays in the table and the job is launched once capacity frees, instead of GitHub retrying the delivery.
+
+**Runner names must be unique**: GitHub rejects a duplicate runner name with 409, so reconciler top-ups append a suffix (`aws-runner-<jobId>-r<base36>`). `buildRunnerName` in `lambda/shared/launcher.ts` is the single source for these names.
+
+**EC2 instance tagging for concurrency, timeout and reconciliation**: Launched instances are tagged `github-aws-runner:managed=true`, `github-aws-runner:launch-time`, `github-aws-runner:job-id`, `github-aws-runner:timeout-minutes`, and `github-aws-runner:runner-name`. The Watchdog uses `DescribeInstances` filtered by those tags to find and time out stale runners. The Webhook Lambda counts running instances by the managed tag to enforce `max-concurrent-runners`. The Reconciler matches `runner-name` against GitHub's runner registrations to tell a runner that is still booting from one whose instance is gone — the latter can never come online and is deregistered.
 
 **Per-job instance/disk/timeout overrides**: Workflows can request a specific instance type, EBS volume size, or timeout via job labels (e.g., `c7a.large`, `disk:100`, `timeout:30`). The Webhook Lambda validates these against the optional SSM bounds parameters (`allowed-instance-types`, `max-ebs-volume-size-gb`, `runner-timeout-minutes`).
 
@@ -59,27 +69,34 @@ This is a CDK TypeScript project that provisions on-demand ephemeral GitHub Acti
 | Webhook | `lambda/webhook/index.ts` | API Gateway POST /webhook | Validate webhook, launch EC2 runner |
 | IP Updater | `lambda/ip-updater/index.ts` | EventBridge (configurable interval) | Refresh API resource policy with GitHub CIDRs |
 | Watchdog | `lambda/watchdog/index.ts` | EventBridge (every 15 min) | Terminate timed-out runner instances |
+| Reconciler | `lambda/reconciler/index.ts` | EventBridge (configurable, default 2 min) | Launch runners for starved queued jobs, prune dead runner registrations |
 | Webhook Registration | `lambda/custom-resource/index.ts` | CloudFormation lifecycle | Register/deregister GitHub webhook |
 | Cache Bucket | `lambda/cache-bucket/index.ts` | CloudFormation lifecycle (conditional) | Create S3 cache bucket and apply lifecycle policy |
 | OIDC | `lambda/oidc/index.ts` | CloudFormation lifecycle (conditional) | Set/delete `AWS_ROLE_ARN` GitHub Actions variable |
 
-GitHub API calls (JIT config generation, webhook create/delete, Actions variable set/delete) are in `lambda/webhook/github-client.ts`.
+GitHub API calls (JIT config generation, runner list/delete, webhook create/delete, Actions variable set/delete) are in `lambda/webhook/github-client.ts`.
+
+`lambda/shared/launcher.ts` holds everything needed to start a runner — AMI resolution, user-data construction, runner naming, instance tagging, and `RunInstances`. Both the Webhook and Reconciler Lambdas call `launchRunner` so replacement instances are identical to webhook-launched ones. `lambda/reconciler/planner.ts` holds the pure launch/prune decisions and is unit-tested directly in `test/reconciler-planner.test.ts`.
 
 ### CDK Stack Structure
 
 The stack constructor (`lib/github-aws-runner-stack.ts`) is organized into sections in this order:
 1. SSM parameter name constants (all built from the configurable prefix)
-2. Synth-time SSM lookups (`valueFromLookup`) for concurrency, throttling, IP updater interval, cache bucket, and OIDC
+2. Synth-time SSM lookups (`valueFromLookup`) for concurrency, throttling, IP updater interval, reconciler interval, cache bucket, and OIDC
 3. VPC and security group
 4. EC2 IAM role and instance profile
-5. Webhook Lambda + API Gateway (RestApi, resource policy, deployment stage, access logs, POST route)
-6. IP Updater Lambda + EventBridge rule
-7. Watchdog Lambda + EventBridge rule
-8. Custom resource (webhook registration) + provider
-9. Conditional: S3 cache bucket custom resource + provider (when `cache-bucket` SSM param is set)
-10. Conditional: OIDC provider, IAM role, OIDC custom resource + provider (when both `oidc-role-policy-arn` and `oidc-subject-pattern` SSM params are set)
-11. Stack outputs
+5. Queued jobs DynamoDB table
+6. Webhook Lambda + API Gateway (RestApi, resource policy, deployment stage, access logs, POST route)
+7. IP Updater Lambda + EventBridge rule
+8. Watchdog Lambda + EventBridge rule
+9. Reconciler Lambda + EventBridge rule
+10. Custom resource (webhook registration) + provider
+11. Conditional: S3 cache bucket custom resource + provider (when `cache-bucket` SSM param is set)
+12. Conditional: OIDC provider, IAM role, OIDC custom resource + provider (when both `oidc-role-policy-arn` and `oidc-subject-pattern` SSM params are set)
+13. Stack outputs
 
 ### Tests
 
-`test/github-aws-runner.test.ts` uses CDK assertions (`Template.fromStack`) to verify that the correct AWS resources are synthesized. The test constructs the stack with a known set of `initialWebhookIps`. When adding new CDK resources or changing existing ones, update the corresponding assertions.
+`test/github-aws-runner.test.ts` uses CDK assertions (`Template.fromStack`) to verify that the correct AWS resources are synthesized. The test constructs the stack with a known set of `initialWebhookIps`. When adding new CDK resources or changing existing ones, update the corresponding assertions — including the Lambda and EventBridge rule counts.
+
+`test/reconciler-planner.test.ts` unit-tests the reconciler's launch and prune decisions against `lambda/reconciler/planner.ts`. The planner takes plain data and returns plain data, so these tests need no AWS or GitHub mocks; keep new reconciliation logic in the planner so it stays that way.

@@ -89,16 +89,56 @@ describe("GithubAwsRunnerStack", () => {
     });
   });
 
-  test("creates five Lambda functions (webhook, ip-updater, watchdog, custom-resource, provider framework)", () => {
-    template.resourceCountIs("AWS::Lambda::Function", 5);
+  test("creates six Lambda functions (webhook, ip-updater, watchdog, reconciler, custom-resource, provider framework)", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 6);
   });
 
-  test("creates two EventBridge rules (IP updater and watchdog)", () => {
+  test("creates three EventBridge rules (IP updater, watchdog and reconciler)", () => {
     template.hasResourceProperties("AWS::Events::Rule", {
       ScheduleExpression: "rate(12 hours)",
     });
     template.hasResourceProperties("AWS::Events::Rule", {
       ScheduleExpression: "rate(15 minutes)",
+    });
+    template.hasResourceProperties("AWS::Events::Rule", {
+      ScheduleExpression: "rate(2 minutes)",
+    });
+  });
+
+  test("creates the queued jobs table with a TTL attribute", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      KeySchema: [{ AttributeName: "jobId", KeyType: "HASH" }],
+      BillingMode: "PAY_PER_REQUEST",
+      TimeToLiveSpecification: { AttributeName: "expiresAt", Enabled: true },
+    });
+  });
+
+  test("webhook Lambda can record and clear queued job rows", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith(["dynamodb:PutItem", "dynamodb:DeleteItem"]),
+          }),
+        ]),
+      }),
+    });
+  });
+
+  test("reconciler Lambda can launch replacement runners", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "ec2:RunInstances",
+            Condition: {
+              StringEquals: {
+                "aws:RequestTag/github-aws-runner:managed": "true",
+              },
+            },
+          }),
+        ]),
+      }),
     });
   });
 

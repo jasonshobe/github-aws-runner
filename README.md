@@ -17,6 +17,7 @@ GitHub Actions job queued
         ▼
   Webhook Lambda
   ├── Validates HMAC-SHA256 webhook signature
+  ├── Records the queued job in DynamoDB (cleared when the job starts/finishes)
   ├── Calls GitHub API to generate JIT runner config
   └── Launches EC2 instance (RunsOn AMI)
               │
@@ -32,6 +33,11 @@ Scheduled: every N hours (configurable via SSM)
 Scheduled: every 15 minutes
   Watchdog Lambda
   └── Terminates any runner instances that exceed the timeout
+
+Scheduled: every N minutes (configurable via SSM, default 2)
+  Reconciler Lambda
+  ├── Launches runners for queued jobs left without capacity
+  └── Deregisters runners whose instance never came online
 
 CDK deploy/destroy
   Webhook Registration Lambda
@@ -83,6 +89,8 @@ These parameters do not need to exist in SSM unless you want to override the doc
 | `/github-aws-runner/allowed-instance-types` | String | Comma-separated list of instance types workflows may request via label |
 | `/github-aws-runner/max-ebs-volume-size-gb` | String | Upper bound on the EBS volume size workflows may request in GB |
 | `/github-aws-runner/ip-updater-interval-hours` | String | IP updater schedule in hours (default: `12`); if omitted, deploy uses `12`; requires `npx cdk deploy` to take effect |
+| `/github-aws-runner/reconciler-interval-minutes` | String | Reconciler schedule in minutes (default: `2`); requires `npx cdk deploy` to take effect |
+| `/github-aws-runner/reconciler-grace-seconds` | String | How long a job may sit queued before the reconciler launches extra capacity for it (default: `180`) |
 | `/github-aws-runner/ami-name` | String | AMI name pattern (default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
 | `/github-aws-runner/ami-owners` | String | Comma-separated AMI owner account IDs (default: `135269210855`) |
 | `/github-aws-runner/cache-bucket` | String | Name of the S3 bucket to create for runner caching; if set, the bucket is created and managed by the stack |
@@ -98,6 +106,8 @@ The personal access token stored in `/github-aws-runner/github-token` must have:
 |--------|----------------|
 | Repository runners | `administration: write` (fine-grained) or `repo` (classic) |
 | Organization runners | `organization_self_hosted_runners: write` (fine-grained) or `admin:org` (classic) |
+
+These scopes cover generating JIT runner configs as well as listing and deleting runner registrations, which the reconciler needs.
 | Webhook management | `admin:repo_hook` (repo) or `admin:org_hook` (org) |
 | OIDC variable management | `Variables` read/write (fine-grained) or `repo` / `admin:org` (classic, already required above) |
 
@@ -293,6 +303,23 @@ Most SSM parameters take effect immediately without redeploying the stack. The f
 - **max-concurrent-runners** — also controls Lambda reserved concurrency
 - **api-throttle-rate-limit** and **api-throttle-burst-limit** — control API Gateway stage throttling
 - **ip-updater-interval-hours** — controls the EventBridge schedule rate for the IP updater
+- **reconciler-interval-minutes** — controls the EventBridge schedule rate for the reconciler
+
+### Runner Capacity Reconciliation
+
+Every runner this stack creates is registered with the same labels (`self-hosted`, `linux`, `x64`), so GitHub treats them as interchangeable. When a runner comes online GitHub gives it the **oldest** matching queued job in your org or repo — not necessarily the job whose webhook launched it. The `aws-runner-<job id>` name is only a label for humans.
+
+That means launching one instance per `workflow_job.queued` webhook is not enough on its own. If an instance ever fails to bring its runner online, or is reaped while idle, the queue is left permanently one runner short: from then on each new runner picks up an older backlog job and the newest job sits in `queued` until someone cancels it. Busy repositories hide this as "jobs are just slow to start"; a repository that queues jobs infrequently sees them never start at all.
+
+The reconciler closes that gap. The webhook records each queued job in a DynamoDB table and removes it when GitHub reports the job started or finished. Every `reconciler-interval-minutes` the reconciler compares jobs that have waited longer than `reconciler-grace-seconds` against the runner capacity actually in flight, launches whatever is missing (never exceeding `max-concurrent-runners`), and deregisters runners whose instance no longer exists and which therefore can never come online.
+
+To see what it is doing:
+
+```bash
+aws logs tail /aws/lambda/<stack>-ReconcilerFn<suffix> --follow
+```
+
+A healthy idle log line reads `Reconciler: runner supply covers the backlog, nothing to launch`.
 
 ### Runner Timeout
 
