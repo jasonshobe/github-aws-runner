@@ -1,5 +1,6 @@
 import * as cdk from "aws-cdk-lib";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as events from "aws-cdk-lib/aws-events";
 import * as eventsTargets from "aws-cdk-lib/aws-events-targets";
@@ -46,6 +47,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_CACHE_EXPIRATION_DAYS    = `${p}/cache-expiration-days`;
     const SSM_OIDC_ROLE_POLICY_ARN     = `${p}/oidc-role-policy-arn`;
     const SSM_OIDC_SUBJECT_PATTERN     = `${p}/oidc-subject-pattern`;
+    const SSM_RECONCILER_INTERVAL      = `${p}/reconciler-interval-minutes`;
+    const SSM_RECONCILER_GRACE_SECONDS = `${p}/reconciler-grace-seconds`;
     const lambdaExternalModules = ["@aws-sdk/*"];
     const optionalLookup = (parameterName: string, defaultValue = "") =>
       ssm.StringParameter.valueFromLookup(this, parameterName, defaultValue);
@@ -170,6 +173,23 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         : undefined;
 
     // -------------------------------------------------------------------------
+    // Queued jobs table
+    //
+    // Every JIT runner this stack mints carries the same labels, so GitHub
+    // treats them as fungible and hands a newly-online runner the oldest
+    // matching queued job — not necessarily the job whose webhook launched it.
+    // This table is the record of which jobs are still waiting, letting the
+    // reconciler keep runner supply at or above demand instead of trusting a
+    // 1:1 webhook-to-instance correspondence that GitHub never guarantees.
+    // -------------------------------------------------------------------------
+    const queuedJobsTable = new dynamodb.Table(this, "QueuedJobsTable", {
+      partitionKey: { name: "jobId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "expiresAt",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // -------------------------------------------------------------------------
     // Lambda: Webhook handler
     // -------------------------------------------------------------------------
     const webhookFn = new NodejsFunction(this, "WebhookFn", {
@@ -198,8 +218,11 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         ALLOWED_INSTANCE_TYPES_PARAM: SSM_ALLOWED_INSTANCE_TYPES,
         MAX_EBS_VOLUME_SIZE_PARAM: SSM_MAX_EBS_VOLUME_SIZE,
         RUNNER_TIMEOUT_PARAM: SSM_RUNNER_TIMEOUT,
+        QUEUED_JOBS_TABLE: queuedJobsTable.tableName,
       },
     });
+
+    queuedJobsTable.grantWriteData(webhookFn);
 
     webhookFn.addToRolePolicy(
       new iam.PolicyStatement({
@@ -402,6 +425,130 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     });
 
     // -------------------------------------------------------------------------
+    // Lambda: Reconciler
+    //
+    // Tops up runner capacity for jobs that are still sitting in the queued-jobs
+    // table with no idle runner to serve them, and prunes runner registrations
+    // whose instance never consumed the JIT config. Without this, a single
+    // instance that fails to bootstrap permanently starves the newest job in the
+    // queue.
+    // -------------------------------------------------------------------------
+    const reconcilerFn = new NodejsFunction(this, "ReconcilerFn", {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, "../lambda/reconciler/index.ts"),
+      handler: "handler",
+      timeout: cdk.Duration.minutes(5),
+      bundling: {
+        externalModules: lambdaExternalModules,
+      },
+      environment: {
+        GITHUB_TOKEN_PARAM: SSM_GITHUB_TOKEN,
+        TARGET_TYPE_PARAM: SSM_TARGET_TYPE,
+        TARGET_SLUG_PARAM: SSM_TARGET_SLUG,
+        INSTANCE_TYPE_PARAM: SSM_INSTANCE_TYPE,
+        EBS_VOLUME_SIZE_PARAM: SSM_EBS_VOLUME_SIZE,
+        MAX_CONCURRENT_RUNNERS_PARAM: SSM_MAX_CONCURRENT_RUNNERS,
+        RUNNER_TIMEOUT_PARAM: SSM_RUNNER_TIMEOUT,
+        RECONCILER_GRACE_SECONDS_PARAM: SSM_RECONCILER_GRACE_SECONDS,
+        AMI_NAME_PARAM: SSM_AMI_NAME,
+        AMI_OWNERS_PARAM: SSM_AMI_OWNERS,
+        SUBNET_ID: vpc.publicSubnets[0].subnetId,
+        SECURITY_GROUP_ID: runnerSecurityGroup.securityGroupId,
+        INSTANCE_PROFILE_ARN: instanceProfile.attrArn,
+        QUEUED_JOBS_TABLE: queuedJobsTable.tableName,
+      },
+    });
+
+    // Read to size the backlog; delete to drop rows for jobs GitHub reports are
+    // no longer queued.
+    queuedJobsTable.grantReadWriteData(reconcilerFn);
+
+    reconcilerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter", "ssm:GetParameters"],
+        resources: [
+          ssmArn(this, SSM_GITHUB_TOKEN),
+          ssmArn(this, SSM_TARGET_TYPE),
+          ssmArn(this, SSM_TARGET_SLUG),
+          ssmArn(this, SSM_INSTANCE_TYPE),
+          ssmArn(this, SSM_EBS_VOLUME_SIZE),
+          ssmArn(this, SSM_MAX_CONCURRENT_RUNNERS),
+          ssmArn(this, SSM_RUNNER_TIMEOUT),
+          ssmArn(this, SSM_RECONCILER_GRACE_SECONDS),
+          ssmArn(this, SSM_AMI_NAME),
+          ssmArn(this, SSM_AMI_OWNERS),
+        ],
+      })
+    );
+
+    reconcilerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:DescribeInstances", "ec2:DescribeImages"],
+        resources: ["*"],
+      })
+    );
+
+    // Same split as the webhook Lambda: the managed-tag condition can only be
+    // applied to the instance being created, not to supporting resources.
+    reconcilerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:RunInstances"],
+        resources: [`arn:aws:ec2:${this.region}:${this.account}:instance/*`],
+        conditions: {
+          StringEquals: {
+            "aws:RequestTag/github-aws-runner:managed": "true",
+          },
+        },
+      })
+    );
+
+    reconcilerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:RunInstances"],
+        resources: [
+          `arn:aws:ec2:${this.region}::image/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:network-interface/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:security-group/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:subnet/*`,
+          `arn:aws:ec2:${this.region}:${this.account}:volume/*`,
+        ],
+      })
+    );
+
+    reconcilerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:CreateTags"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "ec2:CreateAction": "RunInstances",
+          },
+        },
+      })
+    );
+
+    reconcilerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:PassRole"],
+        resources: [instanceRole.roleArn],
+      })
+    );
+
+    const reconcilerIntervalMinutes = parseInt(
+      optionalLookup(SSM_RECONCILER_INTERVAL, "2"),
+      10
+    );
+
+    new events.Rule(this, "ReconcilerSchedule", {
+      schedule: events.Schedule.rate(
+        cdk.Duration.minutes(
+          Number.isNaN(reconcilerIntervalMinutes) ? 2 : reconcilerIntervalMinutes
+        )
+      ),
+      targets: [new eventsTargets.LambdaFunction(reconcilerFn)],
+    });
+
+    // -------------------------------------------------------------------------
     // Custom resource: GitHub webhook registration
     // -------------------------------------------------------------------------
     const webhookRegistrationFn = new NodejsFunction(
@@ -495,8 +642,10 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       );
 
       // Inject the bucket name into the runner environment so runs-on/cache
-      // can use it without any per-workflow configuration.
+      // can use it without any per-workflow configuration. Both Lambdas that
+      // launch runners need it so replacement instances get the same cache.
       webhookFn.addEnvironment("CACHE_BUCKET_NAME", cacheBucketName);
+      reconcilerFn.addEnvironment("CACHE_BUCKET_NAME", cacheBucketName);
     }
 
     // -------------------------------------------------------------------------

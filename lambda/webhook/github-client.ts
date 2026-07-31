@@ -13,23 +13,22 @@ export interface WebhookCreateResult {
 /**
  * Generates a JIT (Just-In-Time) runner config for an ephemeral self-hosted runner.
  * The returned encodedJitConfig is passed directly to the runner via --jitconfig.
+ *
+ * `runnerName` must be unique within the target — GitHub rejects a duplicate with
+ * 409. It is also the key the reconciler uses to tie a runner registration back
+ * to the EC2 instance meant to consume it, via the
+ * `github-aws-runner:runner-name` instance tag.
  */
 export async function generateJitConfig(
-  jobId: number,
+  runnerName: string,
   targetType: string,
   targetSlug: string,
   token: string
 ): Promise<JitConfigResult> {
-  let endpoint: string;
-  if (targetType === "org") {
-    endpoint = `${GITHUB_API_BASE}/orgs/${encodeURIComponent(targetSlug)}/actions/runners/generate-jitconfig`;
-  } else {
-    const [owner, repo] = targetSlug.split("/");
-    endpoint = `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runners/generate-jitconfig`;
-  }
+  const endpoint = `${runnerScopeEndpoint(targetType, targetSlug)}/generate-jitconfig`;
 
   const body = {
-    name: `aws-runner-${jobId}`,
+    name: runnerName,
     runner_group_id: 1,
     labels: ["self-hosted", "linux", "x64"],
     work_folder: "_work",
@@ -62,6 +61,127 @@ export async function generateJitConfig(
     encodedJitConfig: data.encoded_jit_config,
     runnerId: data.runner.id,
   };
+}
+
+/**
+ * Reads the current status of a workflow job (`queued`, `in_progress`,
+ * `completed`). Returns undefined if GitHub no longer knows about the job.
+ *
+ * The reconciler uses this to confirm a job really is still waiting before
+ * spending money on a runner for it, so a queued-jobs row that leaked (a missed
+ * `in_progress`/`completed` delivery) cannot drive repeated launches.
+ */
+export async function getJobStatus(
+  repoFullName: string,
+  jobId: string,
+  token: string
+): Promise<string | undefined> {
+  const [owner, repo] = repoFullName.split("/");
+  const endpoint = `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/jobs/${encodeURIComponent(jobId)}`;
+
+  const response = await fetch(endpoint, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+
+  if (response.status === 404) {
+    return undefined;
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `GitHub get job failed: ${response.status} ${response.statusText} — ${text}`
+    );
+  }
+
+  const data = (await response.json()) as { status?: string };
+  return data.status;
+}
+
+export interface RunnerRegistration {
+  id: number;
+  name: string;
+  status: string;
+  busy: boolean;
+}
+
+/**
+ * Lists every self-hosted runner registered on the target org or repo.
+ * Follows pagination so the reconciler sees the complete set.
+ */
+export async function listRunners(
+  targetType: string,
+  targetSlug: string,
+  token: string
+): Promise<RunnerRegistration[]> {
+  const base = runnerScopeEndpoint(targetType, targetSlug);
+  const runners: RunnerRegistration[] = [];
+
+  for (let page = 1; ; page++) {
+    const response = await fetch(`${base}?per_page=100&page=${page}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(
+        `GitHub list runners failed: ${response.status} ${response.statusText} — ${text}`
+      );
+    }
+
+    const data = (await response.json()) as {
+      total_count: number;
+      runners: RunnerRegistration[];
+    };
+
+    runners.push(...(data.runners ?? []));
+    if (runners.length >= (data.total_count ?? 0) || (data.runners ?? []).length === 0) {
+      return runners;
+    }
+  }
+}
+
+/**
+ * Deletes a runner registration by ID.
+ * Returns silently if the runner is already gone (404).
+ */
+export async function deleteRunner(
+  targetType: string,
+  targetSlug: string,
+  runnerId: number,
+  token: string
+): Promise<void> {
+  const endpoint = `${runnerScopeEndpoint(targetType, targetSlug)}/${runnerId}`;
+
+  const response = await fetch(endpoint, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+
+  if (response.status === 404) {
+    return; // Already gone — idempotent delete
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `GitHub runner delete failed: ${response.status} ${response.statusText} — ${text}`
+    );
+  }
 }
 
 /**
@@ -230,6 +350,14 @@ export async function deleteVariable(
       `GitHub variable delete failed: ${response.status} ${response.statusText} — ${text}`
     );
   }
+}
+
+function runnerScopeEndpoint(targetType: string, targetSlug: string): string {
+  if (targetType === "org") {
+    return `${GITHUB_API_BASE}/orgs/${encodeURIComponent(targetSlug)}/actions/runners`;
+  }
+  const [owner, repo] = targetSlug.split("/");
+  return `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runners`;
 }
 
 function webhookEndpoint(targetType: string, targetSlug: string): string {
