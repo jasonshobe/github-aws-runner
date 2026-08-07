@@ -26,6 +26,8 @@ export interface QueuedJob {
   runnerName: string;
   /** `owner/repo` the job belongs to, used to re-check its status on GitHub. */
   repo?: string;
+  /** How many replacement runners the reconciler has already launched for it. */
+  topUps?: number;
   instanceType?: string;
   ebsSizeGb?: number;
   timeoutMinutes?: number;
@@ -44,6 +46,8 @@ export interface LiveInstance {
   instanceId: string;
   /** Value of the `github-aws-runner:runner-name` tag. */
   runnerName?: string;
+  /** Value of the `github-aws-runner:launch-time` tag. */
+  launchedAt?: string;
 }
 
 export interface PlanInput {
@@ -52,24 +56,59 @@ export interface PlanInput {
   liveInstances: LiveInstance[];
   maxConcurrentRunners: number;
   graceMs: number;
+  /**
+   * How long an instance is allowed to be running before its runner must be
+   * `online` with GitHub for the instance to still count as usable capacity.
+   */
+  bootGraceMs: number;
+  /**
+   * Cap on replacement runners per job. Bounds the damage when every
+   * replacement also fails to come online, which is what a GitHub-side outage
+   * looks like from here.
+   */
+  maxTopUps: number;
   now: number;
 }
 
 export interface Plan {
   /** Jobs to mint a replacement runner and instance for, oldest first. */
   launchFor: QueuedJob[];
+  /**
+   * Instances that are running but were not counted as capacity because their
+   * runner never came online. Reported so the reason a top-up happened is
+   * visible in the logs.
+   */
+  discountedInstanceIds: string[];
 }
 
 export function planLaunches(input: PlanInput): Plan {
   const stale = input.queuedJobs
     .filter((j) => input.now - Date.parse(j.queuedAt) >= input.graceMs)
+    .filter((j) => (j.topUps ?? 0) < input.maxTopUps)
     .sort((a, b) => Date.parse(a.queuedAt) - Date.parse(b.queuedAt));
+
+  // An instance only represents real capacity while it can still plausibly take
+  // a job. Past the boot grace its runner must actually be `online` with
+  // GitHub — an instance whose runner never registered (failed bootstrap, or
+  // GitHub dropping the session as during the 2026-08-06 Actions outage) can
+  // never be handed work, and counting it stalls the backlog until the watchdog
+  // times the instance out.
+  const runnerByName = new Map(input.runners.map((r) => [r.name, r]));
+  const usableInstances = input.liveInstances.filter((i) => {
+    const launchedAt = i.launchedAt ? Date.parse(i.launchedAt) : NaN;
+    // Missing or unparseable launch time — assume it is still booting rather
+    // than risk launching duplicate capacity for it.
+    if (Number.isNaN(launchedAt)) return true;
+    if (input.now - launchedAt <= input.bootGraceMs) return true;
+    return i.runnerName !== undefined
+      && runnerByName.get(i.runnerName)?.status === "online";
+  });
 
   // Runner capacity in flight that has not yet claimed a job. A busy runner is
   // already executing a job that has left the queued-jobs table, so it does
   // nothing for the current backlog.
   const busyRunners = input.runners.filter((r) => r.busy).length;
-  const idleSupply = Math.max(0, input.liveInstances.length - busyRunners);
+  const idleSupply = Math.max(0, usableInstances.length - busyRunners);
 
   const shortfall = Math.max(0, stale.length - idleSupply);
 
@@ -79,7 +118,14 @@ export function planLaunches(input: PlanInput): Plan {
     input.maxConcurrentRunners - input.liveInstances.length
   );
 
-  return { launchFor: stale.slice(0, Math.min(shortfall, freeCapacity)) };
+  const usableIds = new Set(usableInstances.map((i) => i.instanceId));
+
+  return {
+    launchFor: stale.slice(0, Math.min(shortfall, freeCapacity)),
+    discountedInstanceIds: input.liveInstances
+      .filter((i) => !usableIds.has(i.instanceId))
+      .map((i) => i.instanceId),
+  };
 }
 
 export interface PruneInput {

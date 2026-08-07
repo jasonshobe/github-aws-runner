@@ -49,6 +49,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_OIDC_SUBJECT_PATTERN     = `${p}/oidc-subject-pattern`;
     const SSM_RECONCILER_INTERVAL      = `${p}/reconciler-interval-minutes`;
     const SSM_RECONCILER_GRACE_SECONDS = `${p}/reconciler-grace-seconds`;
+    const SSM_RECONCILER_BOOT_GRACE    = `${p}/reconciler-boot-grace-seconds`;
+    const SSM_RECONCILER_MAX_TOP_UPS   = `${p}/reconciler-max-top-ups`;
     const lambdaExternalModules = ["@aws-sdk/*"];
     const optionalLookup = (parameterName: string, defaultValue = "") =>
       ssm.StringParameter.valueFromLookup(this, parameterName, defaultValue);
@@ -450,6 +452,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         MAX_CONCURRENT_RUNNERS_PARAM: SSM_MAX_CONCURRENT_RUNNERS,
         RUNNER_TIMEOUT_PARAM: SSM_RUNNER_TIMEOUT,
         RECONCILER_GRACE_SECONDS_PARAM: SSM_RECONCILER_GRACE_SECONDS,
+        RECONCILER_BOOT_GRACE_SECONDS_PARAM: SSM_RECONCILER_BOOT_GRACE,
+        RECONCILER_MAX_TOP_UPS_PARAM: SSM_RECONCILER_MAX_TOP_UPS,
         AMI_NAME_PARAM: SSM_AMI_NAME,
         AMI_OWNERS_PARAM: SSM_AMI_OWNERS,
         SUBNET_ID: vpc.publicSubnets[0].subnetId,
@@ -475,6 +479,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_MAX_CONCURRENT_RUNNERS),
           ssmArn(this, SSM_RUNNER_TIMEOUT),
           ssmArn(this, SSM_RECONCILER_GRACE_SECONDS),
+          ssmArn(this, SSM_RECONCILER_BOOT_GRACE),
+          ssmArn(this, SSM_RECONCILER_MAX_TOP_UPS),
           ssmArn(this, SSM_AMI_NAME),
           ssmArn(this, SSM_AMI_OWNERS),
         ],
