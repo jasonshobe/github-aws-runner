@@ -3,12 +3,14 @@ import {
   DynamoDBClient,
   ScanCommand,
   DeleteItemCommand,
+  UpdateItemCommand,
 } from "@aws-sdk/client-dynamodb";
 import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
 import { deleteRunner, getJobStatus, listRunners } from "../webhook/github-client";
 import {
   buildRunnerName,
   launchRunner,
+  TAG_LAUNCH_TIME,
   TAG_MANAGED,
   TAG_RUNNER_NAME,
 } from "../shared/launcher";
@@ -24,6 +26,13 @@ const ssm = new SSMClient({});
 const dynamo = new DynamoDBClient({});
 
 const DEFAULT_GRACE_SECONDS = 180;
+/**
+ * How long an instance may run before its runner has to be `online` with GitHub
+ * for it to still count as capacity. Comfortably above the ~20s a healthy runner
+ * takes to register, so a slow boot is never mistaken for a dead one.
+ */
+const DEFAULT_BOOT_GRACE_SECONDS = 300;
+const DEFAULT_MAX_TOP_UPS = 3;
 
 async function getParams() {
   const result = await ssm.send(
@@ -37,6 +46,8 @@ async function getParams() {
         process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
         process.env.RUNNER_TIMEOUT_PARAM!,
         process.env.RECONCILER_GRACE_SECONDS_PARAM!,
+        process.env.RECONCILER_BOOT_GRACE_SECONDS_PARAM!,
+        process.env.RECONCILER_MAX_TOP_UPS_PARAM!,
       ],
       WithDecryption: true,
     })
@@ -51,6 +62,14 @@ async function getParams() {
     byName[process.env.RECONCILER_GRACE_SECONDS_PARAM!],
     10
   );
+  const bootGraceRaw = parseInt(
+    byName[process.env.RECONCILER_BOOT_GRACE_SECONDS_PARAM!],
+    10
+  );
+  const maxTopUpsRaw = parseInt(
+    byName[process.env.RECONCILER_MAX_TOP_UPS_PARAM!],
+    10
+  );
   return {
     githubToken: byName[process.env.GITHUB_TOKEN_PARAM!],
     targetType: byName[process.env.TARGET_TYPE_PARAM!],
@@ -63,6 +82,10 @@ async function getParams() {
     ),
     runnerTimeoutMinutes: parseInt(byName[process.env.RUNNER_TIMEOUT_PARAM!], 10),
     graceSeconds: Number.isNaN(graceRaw) ? DEFAULT_GRACE_SECONDS : graceRaw,
+    bootGraceSeconds: Number.isNaN(bootGraceRaw)
+      ? DEFAULT_BOOT_GRACE_SECONDS
+      : bootGraceRaw,
+    maxTopUps: Number.isNaN(maxTopUpsRaw) ? DEFAULT_MAX_TOP_UPS : maxTopUpsRaw,
   };
 }
 
@@ -88,6 +111,7 @@ async function scanQueuedJobs(): Promise<QueuedJob[]> {
         timeoutMinutes: item.timeoutMinutes?.N
           ? parseInt(item.timeoutMinutes.N, 10)
           : undefined,
+        topUps: item.topUps?.N ? parseInt(item.topUps.N, 10) : 0,
       });
     }
     startKey = result.LastEvaluatedKey;
@@ -113,6 +137,9 @@ async function describeLiveInstances(): Promise<LiveInstance[]> {
         instances.push({
           instanceId: instance.InstanceId!,
           runnerName: instance.Tags?.find((t) => t.Key === TAG_RUNNER_NAME)?.Value,
+          launchedAt:
+            instance.Tags?.find((t) => t.Key === TAG_LAUNCH_TIME)?.Value ??
+            instance.LaunchTime?.toISOString(),
         });
       }
     }
@@ -137,14 +164,37 @@ export async function handler(): Promise<void> {
   );
 
   const now = Date.now();
-  const { launchFor } = planLaunches({
+  const { launchFor, discountedInstanceIds } = planLaunches({
     queuedJobs,
     runners,
     liveInstances,
     maxConcurrentRunners: params.maxConcurrentRunners,
     graceMs: params.graceSeconds * 1000,
+    bootGraceMs: params.bootGraceSeconds * 1000,
+    maxTopUps: params.maxTopUps,
     now,
   });
+
+  if (discountedInstanceIds.length > 0) {
+    // Not an error on its own: an ephemeral runner deregisters itself the moment
+    // it finishes a job, so an instance in teardown legitimately shows up here.
+    // It only matters when a job is waiting, which is what launchFor reflects.
+    console.warn(
+      `Reconciler: not counting ${discountedInstanceIds.length} instance(s) as capacity — no ` +
+        `online runner past the ${params.bootGraceSeconds}s boot grace: ${discountedInstanceIds.join(", ")}. ` +
+        `Left for the watchdog to retire.`
+    );
+  }
+
+  const stalled = queuedJobs.filter(
+    (j) => (j.topUps ?? 0) >= params.maxTopUps
+  );
+  for (const job of stalled) {
+    console.warn(
+      `Reconciler: job ${job.jobId} has already been given ${job.topUps} replacement runner(s) ` +
+        `and is still queued — not launching more. Something is failing beyond this stack.`
+    );
+  }
 
   if (launchFor.length === 0) {
     console.log("Reconciler: runner supply covers the backlog, nothing to launch");
@@ -205,6 +255,31 @@ export async function handler(): Promise<void> {
     } catch (err) {
       // One failed top-up must not stop the rest of the backlog being covered.
       console.error(`Reconciler: failed to launch a runner for job ${job.jobId}`, err);
+      continue;
+    }
+
+    // Bounds how many replacements a single job can consume when every one of
+    // them also fails to come online. Kept out of the launch try/catch so a
+    // bookkeeping failure is never reported as a failed launch.
+    try {
+      await dynamo.send(
+        new UpdateItemCommand({
+          TableName: process.env.QUEUED_JOBS_TABLE!,
+          Key: { jobId: { S: job.jobId } },
+          UpdateExpression: "SET topUps = if_not_exists(topUps, :zero) + :one",
+          // No-op if the row has since been deleted because the job started.
+          ConditionExpression: "attribute_exists(jobId)",
+          ExpressionAttributeValues: { ":zero": { N: "0" }, ":one": { N: "1" } },
+        })
+      );
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      if (name !== "ConditionalCheckFailedException") {
+        console.error(
+          `Reconciler: could not record the top-up count for job ${job.jobId}`,
+          err
+        );
+      }
     }
   }
 

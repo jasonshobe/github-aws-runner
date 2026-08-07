@@ -91,6 +91,8 @@ These parameters do not need to exist in SSM unless you want to override the doc
 | `/github-aws-runner/ip-updater-interval-hours` | String | IP updater schedule in hours (default: `12`); if omitted, deploy uses `12`; requires `npx cdk deploy` to take effect |
 | `/github-aws-runner/reconciler-interval-minutes` | String | Reconciler schedule in minutes (default: `2`); requires `npx cdk deploy` to take effect |
 | `/github-aws-runner/reconciler-grace-seconds` | String | How long a job may sit queued before the reconciler launches extra capacity for it (default: `180`) |
+| `/github-aws-runner/reconciler-boot-grace-seconds` | String | How long an instance may run before its runner must be `online` with GitHub for it to still count as capacity (default: `300`) |
+| `/github-aws-runner/reconciler-max-top-ups` | String | Maximum replacement runners the reconciler will launch for a single job (default: `3`) |
 | `/github-aws-runner/ami-name` | String | AMI name pattern (default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
 | `/github-aws-runner/ami-owners` | String | Comma-separated AMI owner account IDs (default: `135269210855`) |
 | `/github-aws-runner/cache-bucket` | String | Name of the S3 bucket to create for runner caching; if set, the bucket is created and managed by the stack |
@@ -312,6 +314,10 @@ Every runner this stack creates is registered with the same labels (`self-hosted
 That means launching one instance per `workflow_job.queued` webhook is not enough on its own. If an instance ever fails to bring its runner online, or is reaped while idle, the queue is left permanently one runner short: from then on each new runner picks up an older backlog job and the newest job sits in `queued` until someone cancels it. Busy repositories hide this as "jobs are just slow to start"; a repository that queues jobs infrequently sees them never start at all.
 
 The reconciler closes that gap. The webhook records each queued job in a DynamoDB table and removes it when GitHub reports the job started or finished. Every `reconciler-interval-minutes` the reconciler compares jobs that have waited longer than `reconciler-grace-seconds` against the runner capacity actually in flight, launches whatever is missing (never exceeding `max-concurrent-runners`), and deregisters runners whose instance no longer exists and which therefore can never come online.
+
+An instance only counts as capacity while it can still plausibly take a job. Once it has been running longer than `reconciler-boot-grace-seconds`, its runner must actually be `online` with GitHub — an instance whose runner never registered can never be handed work, and counting it would stall the backlog until the watchdog timed the instance out an hour later. Such instances are left for the watchdog to retire rather than terminated outright, so a transient GitHub API blip can never kill a runner that is midway through a job.
+
+`reconciler-max-top-ups` bounds how many replacements a single job can consume. If every replacement also fails to come online — which is what a GitHub-side outage looks like from here — the reconciler stops after that many and logs a warning rather than filling your concurrency budget with useless instances.
 
 To see what it is doing:
 
