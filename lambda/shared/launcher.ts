@@ -154,6 +154,7 @@ sudo -E -u runner ./run.sh --jitconfig "\${JIT_CONFIG}"
 export interface LaunchRequest {
   jobId: string;
   runnerName: string;
+  labels: string[];
   instanceType: string;
   ebsSizeGb: number;
   timeoutMinutes: number;
@@ -171,7 +172,8 @@ export async function launchRunner(req: LaunchRequest): Promise<string> {
     req.runnerName,
     req.targetType,
     req.targetSlug,
-    req.githubToken
+    req.githubToken,
+    req.labels
   );
   console.log(`Generated JIT config ${req.runnerName} for job ${req.jobId}`);
 

@@ -328,6 +328,7 @@ export async function handler(
         instanceType: { S: resolvedInstanceType },
         ebsSizeGb: { N: String(resolvedEbsSize) },
         timeoutMinutes: { N: String(resolvedTimeoutMinutes) },
+        labels: { SS: Array.from(new Set(payload.workflow_job.labels)) },
         expiresAt: {
           N: String(Math.floor(Date.parse(queuedAt) / 1000) + ROW_TTL_SECONDS),
         },
@@ -348,6 +349,7 @@ export async function handler(
   await launchRunner({
     jobId,
     runnerName,
+    labels: payload.workflow_job.labels,
     instanceType: resolvedInstanceType,
     ebsSizeGb: resolvedEbsSize,
     timeoutMinutes: resolvedTimeoutMinutes,

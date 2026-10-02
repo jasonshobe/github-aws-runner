@@ -100,6 +100,68 @@ describe("planLaunches", () => {
     expect(plan.launchFor.map((j) => j.jobId)).toEqual(["100", "200"]);
   });
 
+  it("does not count idle runner supply that lacks the queued job labels", () => {
+    const plan = planLaunches({
+      queuedJobs: [
+        {
+          ...job("100", 10),
+          labels: ["self-hosted", "instance-type:m5a.xlarge"],
+        },
+      ],
+      runners: [
+        {
+          id: 1,
+          name: "aws-runner-200",
+          status: "online",
+          busy: false,
+          labels: ["self-hosted", "linux", "x64", "instance-type:m7a.2xlarge"],
+        },
+      ],
+      liveInstances: [instance("aws-runner-200", 10)],
+      maxConcurrentRunners: 10,
+      graceMs: 2 * MINUTE,
+      bootGraceMs: BOOT_GRACE,
+      maxTopUps: 3,
+      now: NOW,
+    });
+
+    expect(plan.launchFor.map((j) => j.jobId)).toEqual(["100"]);
+  });
+
+  it("counts idle runner supply when it has all queued job labels", () => {
+    const plan = planLaunches({
+      queuedJobs: [
+        {
+          ...job("100", 10),
+          labels: ["self-hosted", "instance-type:m5a.xlarge", "disk:150"],
+        },
+      ],
+      runners: [
+        {
+          id: 1,
+          name: "aws-runner-100",
+          status: "online",
+          busy: false,
+          labels: [
+            "self-hosted",
+            "linux",
+            "x64",
+            "instance-type:m5a.xlarge",
+            "disk:150",
+          ],
+        },
+      ],
+      liveInstances: [instance("aws-runner-100", 10)],
+      maxConcurrentRunners: 10,
+      graceMs: 2 * MINUTE,
+      bootGraceMs: BOOT_GRACE,
+      maxTopUps: 3,
+      now: NOW,
+    });
+
+    expect(plan.launchFor).toEqual([]);
+  });
+
   // Reproduces the 2026-08-06 starvation: the instance booted and its runner
   // connected, but GitHub never brought the registration online, so the runner
   // could never be given the job. Counting that instance as supply left the job

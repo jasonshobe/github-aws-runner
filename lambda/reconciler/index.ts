@@ -106,6 +106,7 @@ async function scanQueuedJobs(): Promise<QueuedJob[]> {
         queuedAt: item.queuedAt.S,
         runnerName: item.runnerName.S,
         repo: item.repo?.S,
+        labels: item.labels?.SS,
         instanceType: item.instanceType?.S,
         ebsSizeGb: item.ebsSizeGb?.N ? parseInt(item.ebsSizeGb.N, 10) : undefined,
         timeoutMinutes: item.timeoutMinutes?.N
@@ -244,6 +245,7 @@ export async function handler(): Promise<void> {
       await launchRunner({
         jobId: job.jobId,
         runnerName: buildRunnerName(job.jobId, `${suffix}${index}`),
+        labels: job.labels ?? ["self-hosted"],
         instanceType: job.instanceType ?? params.instanceType,
         ebsSizeGb: job.ebsSizeGb ?? params.ebsVolumeSizeGb,
         timeoutMinutes: job.timeoutMinutes ?? params.runnerTimeoutMinutes,
