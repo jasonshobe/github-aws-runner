@@ -116,6 +116,42 @@ shutdown_on_exit() {
 }
 trap shutdown_on_exit EXIT
 
+# AMIs may disable cloud-init's automatic growth. Expand the root filesystem
+# before downloading or starting the runner, even if the partition is already full.
+# Mount metadata may name /dev/root even when that alias does not exist.
+ROOT_DEVICE=$(readlink -f "/dev/block/$(findmnt -n -o MAJ:MIN /)")
+ROOT_FILESYSTEM=$(findmnt -n -o FSTYPE /)
+case "\${ROOT_FILESYSTEM}" in
+  ext4|xfs) ;;
+  *)
+    echo "Unsupported root filesystem: \${ROOT_FILESYSTEM}; expected ext4 or xfs"
+    exit 1
+    ;;
+esac
+
+ROOT_PARENT=$(lsblk -dn -o PKNAME "\${ROOT_DEVICE}")
+ROOT_PARTITION_FILE="/sys/class/block/\${ROOT_DEVICE##*/}/partition"
+if [ -f "\${ROOT_PARTITION_FILE}" ] && [ -n "\${ROOT_PARENT}" ]; then
+  ROOT_PARTITION=$(cat "\${ROOT_PARTITION_FILE}")
+  echo "Growing root partition \${ROOT_PARTITION} on /dev/\${ROOT_PARENT}"
+  GROWPART_STATUS=0
+  growpart "/dev/\${ROOT_PARENT}" "\${ROOT_PARTITION}" || GROWPART_STATUS=$?
+  # growpart returns 1 for NOCHANGE (for example, cloud-init already grew it).
+  if [ "\${GROWPART_STATUS}" -ne 0 ] && [ "\${GROWPART_STATUS}" -ne 1 ]; then
+    echo "Root partition growth failed with status \${GROWPART_STATUS}"
+    exit "\${GROWPART_STATUS}"
+  fi
+elif [ -n "\${ROOT_PARENT}" ] || [ -f "\${ROOT_PARTITION_FILE}" ]; then
+  echo "Unsupported root block device layout: \${ROOT_DEVICE}; expected a disk or partition"
+  exit 1
+fi
+
+echo "Growing \${ROOT_FILESYSTEM} root filesystem on \${ROOT_DEVICE}"
+case "\${ROOT_FILESYSTEM}" in
+  ext4) resize2fs "\${ROOT_DEVICE}" ;;
+  xfs) xfs_growfs -d / ;;
+esac
+
 JIT_CONFIG=${shellQuote(encodedJitConfig)}
 ${cacheEnv}
 if ! id -u runner >/dev/null 2>&1; then

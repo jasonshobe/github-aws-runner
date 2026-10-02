@@ -399,6 +399,10 @@ The webhook Lambda resolves the latest matching AMI at runtime on each cold star
 - Name pattern: `runs-on-v2.*-ubuntu22-full-x64-*`
 - Owner account: `135269210855`
 
+Before starting the runner, instance user data grows the root partition and filesystem to use the requested EBS volume size (`disk:` label or `ebs-volume-size-gb` default). This works even when the AMI disables cloud-init's automatic resizing, and is safe when the root partition or filesystem is already expanded.
+
+Custom AMIs must use an ext4 or XFS root filesystem on a disk or standard partition, with `findmnt`, `lsblk`, `readlink`, `growpart` (for partitioned roots), and the matching filesystem tool (`resize2fs` or `xfs_growfs`) installed. Bootstrap logs errors to `/var/log/github-aws-runner-user-data.log` and shuts down the instance if resizing fails or the root layout is unsupported (for example, LVM).
+
 To use a different image, set one or both optional SSM parameters:
 
 ```bash
