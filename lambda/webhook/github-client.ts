@@ -10,6 +10,13 @@ export interface WebhookCreateResult {
   url: string;
 }
 
+const DEFAULT_RUNNER_LABELS = ["self-hosted", "linux", "x64"];
+const MAX_JIT_LABELS = 100;
+
+function buildJitLabels(jobLabels: string[]): string[] {
+  return Array.from(new Set([...DEFAULT_RUNNER_LABELS, ...jobLabels]));
+}
+
 /**
  * Generates a JIT (Just-In-Time) runner config for an ephemeral self-hosted runner.
  * The returned encodedJitConfig is passed directly to the runner via --jitconfig.
@@ -23,14 +30,21 @@ export async function generateJitConfig(
   runnerName: string,
   targetType: string,
   targetSlug: string,
-  token: string
+  token: string,
+  jobLabels: string[] = ["self-hosted"]
 ): Promise<JitConfigResult> {
   const endpoint = `${runnerScopeEndpoint(targetType, targetSlug)}/generate-jitconfig`;
+  const labels = buildJitLabels(jobLabels);
+  if (labels.length > MAX_JIT_LABELS) {
+    throw new Error(
+      `GitHub JIT config supports at most ${MAX_JIT_LABELS} labels; got ${labels.length}`
+    );
+  }
 
   const body = {
     name: runnerName,
     runner_group_id: 1,
-    labels: ["self-hosted", "linux", "x64"],
+    labels,
     work_folder: "_work",
   };
 
@@ -108,6 +122,7 @@ export interface RunnerRegistration {
   name: string;
   status: string;
   busy: boolean;
+  labels?: { name: string }[] | string[];
 }
 
 /**
