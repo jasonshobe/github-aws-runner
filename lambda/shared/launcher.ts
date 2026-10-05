@@ -119,8 +119,8 @@ trap shutdown_on_exit EXIT
 # AMIs may disable cloud-init's automatic growth. Expand the root filesystem
 # before downloading or starting the runner, even if the partition is already full.
 # Mount metadata may name /dev/root even when that alias does not exist.
-ROOT_DEVICE=$(readlink -f "/dev/block/$(findmnt -n -o MAJ:MIN /)")
-ROOT_FILESYSTEM=$(findmnt -n -o FSTYPE /)
+ROOT_DEVICE=$(readlink -f "/dev/block/$(findmnt -rn -o MAJ:MIN /)")
+ROOT_FILESYSTEM=$(findmnt -rn -o FSTYPE /)
 case "\${ROOT_FILESYSTEM}" in
   ext4|xfs) ;;
   *)
