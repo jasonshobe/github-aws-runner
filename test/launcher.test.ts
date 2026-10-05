@@ -35,8 +35,9 @@ case "$command_name" in
   findmnt)
     case "$*" in
       "-n -o SOURCE /") printf '%s\\n' /dev/root ;;
-      "-n -o MAJ:MIN /") printf '%s\\n' 259:1 ;;
-      "-n -o FSTYPE /") printf '%s\\n' "$TEST_FILESYSTEM" ;;
+      "-n -o MAJ:MIN /") printf '%s\\n' '259:1  ' ;;
+      "-rn -o MAJ:MIN /") printf '%s\\n' 259:1 ;;
+      "-n -o FSTYPE /"|"-rn -o FSTYPE /") printf '%s\\n' "$TEST_FILESYSTEM" ;;
       *) exit 99 ;;
     esac ;;
   readlink)
@@ -97,6 +98,26 @@ esac
 }
 
 describe("runner bootstrap root filesystem growth", () => {
+  const findmntError = spawnSync("findmnt", ["--version"]).error as NodeJS.ErrnoException | undefined;
+  const testWithFindmnt = findmntError?.code === "ENOENT"
+    ? it.skip
+    : it;
+
+  testWithFindmnt("reads mount metadata without surrounding whitespace using real findmnt", () => {
+    const script = Buffer.from(buildUserData("jit-config"), "base64").toString();
+    const commands = [...script.matchAll(/findmnt ([^)\n]+)/g)];
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      const result = spawnSync("findmnt", command[1].split(/\s+/), { encoding: "utf8" });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      // Remove the line terminator, preserving any column padding.
+      const output = result.stdout.replace(/\r?\n$/, "");
+      expect(output).not.toBe("");
+      expect(output).toBe(output.trim());
+    }
+  });
+
   it("grows the NVMe root before starting the runner even when /dev/root is absent", () => {
     expect(runBootstrap()).toEqual({
       status: 0,
