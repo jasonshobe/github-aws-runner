@@ -98,7 +98,7 @@ These parameters do not need to exist in SSM unless you want to override the doc
 | `/github-aws-runner/cache-bucket` | String | Name of the S3 bucket to create for runner caching; if set, the bucket is created and managed by the stack |
 | `/github-aws-runner/cache-expiration-days` | String | Days after which cached objects are deleted (default: `10`; only used when `cache-bucket` is set) |
 | `/github-aws-runner/oidc-role-policy-arn` | String | ARN of an existing managed IAM policy to attach to the OIDC role; setting this (along with `oidc-subject-pattern`) enables OIDC |
-| `/github-aws-runner/oidc-subject-pattern` | String | IAM trust policy subject claim pattern, e.g. `repo:myorg/*:*` or `repo:myorg/myrepo:*`; required when `oidc-role-policy-arn` is set |
+| `/github-aws-runner/oidc-subject-pattern` | String | IAM trust policy subject claim pattern or JSON array of patterns; required when `oidc-role-policy-arn` is set. Legacy example: `repo:myorg/*:*`; immutable example: `repo:myorg@123456/*:*`. See [OIDC Authentication](#oidc-authentication) for mixed-format and exact-subject examples |
 
 ### GitHub Token Permissions
 
@@ -488,7 +488,7 @@ aws ssm put-parameter \
   --value "arn:aws:iam::123456789012:policy/MyWorkflowPolicy"
 
 # Subject claim pattern — restricts which repos/branches can assume the role.
-# For all repos in an org:
+# For all repos in an org using legacy subject claims:
 aws ssm put-parameter \
   --name /github-aws-runner/oidc-subject-pattern \
   --type String \
@@ -504,6 +504,34 @@ npx cdk deploy
 ```
 
 After deployment, the `OidcRoleArn` stack output shows the role ARN and an `AWS_ROLE_ARN` Actions variable is set in your repository or organization.
+
+**Immutable subject claims and mixed repositories.** GitHub's [immutable subject format](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims) includes numeric owner and repository IDs, for example `repo:myorg@123456/myrepo@456789:ref:refs/heads/main`. The legacy pattern `repo:myorg/*:*` does not match this format. Check the repository's configuration to find its `use_immutable_subject` setting and `sub_claim_prefix`:
+
+```bash
+gh api /repos/myorg/myrepo/actions/oidc/customization/sub
+```
+
+To trust both formats, store a JSON array in the existing **String** parameter. IAM allows a subject matching any entry; each entry retains its own repository, branch, or environment restrictions. Use the actual numeric owner ID from GitHub:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/oidc-subject-pattern \
+  --type String \
+  --overwrite \
+  --value '["repo:myorg/*:*","repo:myorg@123456/*:*"]'
+```
+
+Existing single values are used verbatim, including exact subjects with immutable IDs. No migration is needed for deployments already using a specific subject to work around this issue. For example, to allow only the `main` branch in one repository, without wildcards:
+
+```bash
+aws ssm put-parameter \
+  --name /github-aws-runner/oidc-subject-pattern \
+  --type String \
+  --overwrite \
+  --value 'repo:myorg@123456/myrepo@456789:ref:refs/heads/main'
+```
+
+The stack does not expand patterns or discover GitHub subjects automatically. Arrays must be valid JSON with at least one non-empty string; malformed arrays fail synthesis. After changing this parameter, refresh its cached SSM lookup with `npx cdk context --reset '<lookup-key>'` (find the matching key with `npx cdk context`), then run `npx cdk diff` and `npx cdk deploy`.
 
 **Step 3 — Update workflows** to request an OIDC token and call `aws-actions/configure-aws-credentials`:
 

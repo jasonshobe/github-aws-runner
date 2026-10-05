@@ -4,8 +4,15 @@ import { GithubAwsRunnerStack } from "../lib/github-aws-runner-stack";
 
 const FAKE_WEBHOOK_IPS = ["140.82.112.0/20", "185.199.108.0/22"];
 
-function buildTemplate(): Template {
+function buildTemplate(parameters: Record<string, string> = {}, prefix = "/github-aws-runner"): Template {
   const app = new cdk.App();
+  app.node.setContext("ssmPrefix", prefix);
+  for (const [name, value] of Object.entries(parameters)) {
+    app.node.setContext(
+      `ssm:account=123456789012:parameterName=${prefix}/${name}:region=us-east-1`,
+      value
+    );
+  }
   const stack = new GithubAwsRunnerStack(app, "TestStack", {
     initialWebhookIps: FAKE_WEBHOOK_IPS,
     env: { account: "123456789012", region: "us-east-1" },
@@ -193,3 +200,85 @@ describe("GithubAwsRunnerStack", () => {
     });
   });
 });
+
+describe("OIDC subject patterns", () => {
+  const policyArn = "arn:aws:iam::123456789012:policy/MyWorkflowPolicy";
+
+  test.each([
+    "repo:myorg/*:*",
+    "repo:myorg/myrepo:ref:refs/heads/main",
+    "repo:myorg@123/myrepo@456:ref:refs/heads/main",
+    "repository_id:456:environment:Production",
+  ])("preserves the existing single subject value %s", (subject) => {
+    const template = buildTemplate({
+      "oidc-role-policy-arn": policyArn,
+      "oidc-subject-pattern": subject,
+    });
+    expectOidcTrust(template, subject);
+  });
+
+  test("trusts both legacy and immutable subjects from a JSON array", () => {
+    const template = buildTemplate({
+      "oidc-role-policy-arn": policyArn,
+      "oidc-subject-pattern": '["repo:myorg/*:*","repo:myorg@123/*:*"]',
+    });
+    expectOidcTrust(template, ["repo:myorg/*:*", "repo:myorg@123/*:*"]);
+  });
+
+  test("supports exact subjects in an array with a custom SSM prefix", () => {
+    const template = buildTemplate({
+      "oidc-role-policy-arn": policyArn,
+      "oidc-subject-pattern": ' ["repo:myorg/myrepo:ref:refs/heads/main", "repo:myorg@123/myrepo@456:ref:refs/heads/main"] ',
+    }, "/custom-runner");
+    expectOidcTrust(template, [
+      "repo:myorg/myrepo:ref:refs/heads/main",
+      "repo:myorg@123/myrepo@456:ref:refs/heads/main",
+    ]);
+  });
+
+  test.each([
+    "[]",
+    '["repo:myorg/*:*", 123]',
+    '["repo:myorg/*:*", null]',
+    '["repo:myorg/*:*", ""]',
+    '["   "]',
+    '["repo:myorg/*:*"',
+  ])("rejects invalid subject arrays at synth time: %s", (subject) => {
+    expect(() => buildTemplate({
+      "oidc-role-policy-arn": policyArn,
+      "oidc-subject-pattern": subject,
+    })).toThrow(/oidc-subject-pattern.*non-empty JSON array of non-empty strings/);
+  });
+
+  test.each<Record<string, string>>([
+    {},
+    { "oidc-role-policy-arn": policyArn },
+    { "oidc-role-policy-arn": policyArn, "oidc-subject-pattern": "" },
+    { "oidc-subject-pattern": '["repo:myorg/*:*"]' },
+  ])("leaves OIDC disabled when either parameter is missing: %j", (parameters) => {
+    const template = buildTemplate(parameters);
+    template.resourceCountIs("Custom::GithubOidcConfiguration", 0);
+    template.resourceCountIs("AWS::IAM::OIDCProvider", 0);
+  });
+});
+
+function expectOidcTrust(template: Template, subjects: string | string[]): void {
+  template.hasResourceProperties("AWS::IAM::Role", {
+    Description: "Assumed by GitHub Actions workflows via OIDC",
+    ManagedPolicyArns: ["arn:aws:iam::123456789012:policy/MyWorkflowPolicy"],
+    AssumeRolePolicyDocument: {
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Action: "sts:AssumeRoleWithWebIdentity",
+        Principal: { Federated: Match.anyValue() },
+        Condition: {
+          StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+          StringLike: { "token.actions.githubusercontent.com:sub": subjects },
+        },
+      }],
+    },
+  });
+  template.resourceCountIs("Custom::GithubOidcConfiguration", 1);
+  template.hasOutput("OidcRoleArn", {});
+}
