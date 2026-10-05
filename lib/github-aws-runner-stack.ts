@@ -163,16 +163,36 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     // OIDC — both parameters must be set together. Policy ARN is detected by
     // the leading "arn:aws:iam::" prefix; subject pattern by absence of the
     // CDK dummy-value prefix. If either is missing the block is skipped.
+    // Keep single subjects verbatim; JSON arrays allow legacy and immutable
+    // subjects to be trusted together without widening existing patterns.
     const oidcPolicyArnRaw = optionalLookup(SSM_OIDC_ROLE_POLICY_ARN);
     const oidcPolicyArn = oidcPolicyArnRaw.startsWith("arn:aws:iam::")
       ? oidcPolicyArnRaw
       : undefined;
 
     const oidcSubjectPatternRaw = optionalLookup(SSM_OIDC_SUBJECT_PATTERN);
-    const oidcSubjectPattern =
-      oidcPolicyArn !== undefined && !oidcSubjectPatternRaw.startsWith("dummy-value-for-")
+    let oidcSubjectPattern: string | string[] | undefined =
+      oidcPolicyArn !== undefined && oidcSubjectPatternRaw.trim() !== "" &&
+      !oidcSubjectPatternRaw.startsWith("dummy-value-for-")
         ? oidcSubjectPatternRaw
         : undefined;
+
+    if (oidcSubjectPattern !== undefined && oidcSubjectPatternRaw.trimStart().startsWith("[")) {
+      const invalidSubjectPatterns = () => new Error(
+        `${SSM_OIDC_SUBJECT_PATTERN} must contain a non-empty JSON array of non-empty strings`
+      );
+      let patterns: unknown;
+      try {
+        patterns = JSON.parse(oidcSubjectPatternRaw);
+      } catch {
+        throw invalidSubjectPatterns();
+      }
+      if (!Array.isArray(patterns) || patterns.length === 0 ||
+          !patterns.every((pattern) => typeof pattern === "string" && pattern.trim() !== "")) {
+        throw invalidSubjectPatterns();
+      }
+      oidcSubjectPattern = patterns;
+    }
 
     // -------------------------------------------------------------------------
     // Queued jobs table
