@@ -39,12 +39,14 @@ describe("IP updater", () => {
     expect(update.input.restApiId).toBe("webhook-api");
     const patch = update.input.patchOperations![0];
     expect(patch).toMatchObject({ op: "replace", path: "/policy" });
-    expect(JSON.parse(decodeURIComponent(patch.value!))).toEqual({
+    // API Gateway parses the patch value as the policy document itself, so it
+    // must be plain JSON rather than URL-encoded.
+    expect(JSON.parse(patch.value!)).toEqual({
       Version: "2012-10-17",
       Statement: [
         {
           Effect: "Deny",
-          Principal: "*",
+          Principal: { AWS: "*" },
           Action: "execute-api:Invoke",
           Resource: "arn:aws:execute-api:us-east-1:123456789012:webhook-api/*",
           Condition: {
@@ -53,7 +55,7 @@ describe("IP updater", () => {
         },
         {
           Effect: "Allow",
-          Principal: "*",
+          Principal: { AWS: "*" },
           Action: "execute-api:Invoke",
           Resource: "arn:aws:execute-api:us-east-1:123456789012:webhook-api/*",
         },
