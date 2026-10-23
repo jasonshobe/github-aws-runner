@@ -594,6 +594,8 @@ npx cdk deploy
 
 The IP updater Lambda runs on a schedule to keep the API Gateway resource policy in sync with GitHub's current webhook IP ranges. If GitHub's IPs change mid-interval and webhooks start failing, you can trigger an immediate refresh without redeploying.
 
+Each refresh updates the resource policy and creates an API Gateway deployment for the webhook stage so the new ranges take effect. Update or deployment failures fail the invocation and appear in the Lambda `Errors` metric; check the function's CloudWatch logs for details.
+
 The Lambda function name is available as a CloudFormation stack output (`IpUpdaterFunctionName`). To invoke it immediately:
 
 ```bash
