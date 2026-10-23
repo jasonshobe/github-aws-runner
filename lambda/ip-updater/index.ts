@@ -22,7 +22,7 @@ function buildResourcePolicy(
     Statement: [
       {
         Effect: "Deny",
-        Principal: "*",
+        Principal: { AWS: "*" },
         Action: "execute-api:Invoke",
         Resource: resourceArn,
         Condition: {
@@ -33,7 +33,7 @@ function buildResourcePolicy(
       },
       {
         Effect: "Allow",
-        Principal: "*",
+        Principal: { AWS: "*" },
         Action: "execute-api:Invoke",
         Resource: resourceArn,
       },
@@ -78,7 +78,7 @@ export async function handler(): Promise<void> {
           {
             op: "replace",
             path: "/policy",
-            value: encodeURIComponent(policy),
+            value: policy,
           },
         ],
       })
