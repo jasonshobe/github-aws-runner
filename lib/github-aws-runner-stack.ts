@@ -374,15 +374,25 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       },
       environment: {
         REST_API_ID: api.restApiId,
+        REST_API_STAGE_NAME: api.deploymentStage.stageName,
         ACCOUNT_ID: this.account,
       },
     });
 
     ipUpdaterFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["apigateway:PATCH"],
+        actions: ["apigateway:PATCH", "apigateway:UpdateRestApiPolicy"],
         resources: [
           `arn:aws:apigateway:${this.region}::/restapis/${api.restApiId}`,
+        ],
+      })
+    );
+
+    ipUpdaterFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["apigateway:POST"],
+        resources: [
+          `arn:aws:apigateway:${this.region}::/restapis/${api.restApiId}/deployments`,
         ],
       })
     );

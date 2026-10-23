@@ -112,6 +112,55 @@ describe("GithubAwsRunnerStack", () => {
     });
   });
 
+  test("IP updater receives the deployed API and stage", () => {
+    const apiId = Object.keys(template.findResources("AWS::ApiGateway::RestApi"))[0];
+    const stageId = Object.keys(template.findResources("AWS::ApiGateway::Stage", {
+      Properties: { RestApiId: { Ref: apiId }, StageName: "prod" },
+    }))[0];
+    expect(stageId).toBeDefined();
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          REST_API_ID: { Ref: apiId },
+          REST_API_STAGE_NAME: { Ref: stageId },
+          ACCOUNT_ID: "123456789012",
+        }),
+      },
+    });
+  });
+
+  test("IP updater can update the API policy and create deployments only for its API", () => {
+    const apiId = Object.keys(template.findResources("AWS::ApiGateway::RestApi"))[0];
+    const updaterId = Object.keys(template.findResources("AWS::Lambda::Function"))
+      .find((id) => id.startsWith("IpUpdaterFn"))!;
+    const updater = template.toJSON().Resources[updaterId];
+    const roleId = updater.Properties.Role["Fn::GetAtt"][0];
+    const apiArn = {
+      "Fn::Join": ["", ["arn:aws:apigateway:us-east-1::/restapis/", { Ref: apiId }]],
+    };
+    const deploymentsArn = {
+      "Fn::Join": ["", ["arn:aws:apigateway:us-east-1::/restapis/", { Ref: apiId }, "/deployments"]],
+    };
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      Roles: [{ Ref: roleId }],
+      PolicyDocument: {
+        Version: "2012-10-17",
+        Statement: Match.arrayWith([
+          {
+            Effect: "Allow",
+            Action: ["apigateway:PATCH", "apigateway:UpdateRestApiPolicy"],
+            Resource: apiArn,
+          },
+          {
+            Effect: "Allow",
+            Action: "apigateway:POST",
+            Resource: deploymentsArn,
+          },
+        ]),
+      },
+    });
+  });
+
   test("creates the queued jobs table with a TTL attribute", () => {
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       KeySchema: [{ AttributeName: "jobId", KeyType: "HASH" }],

@@ -1,5 +1,6 @@
 import {
   APIGatewayClient,
+  CreateDeploymentCommand,
   UpdateRestApiCommand,
 } from "@aws-sdk/client-api-gateway";
 
@@ -43,6 +44,7 @@ function buildResourcePolicy(
 
 export async function handler(): Promise<void> {
   const restApiId = process.env.REST_API_ID!;
+  const stageName = process.env.REST_API_STAGE_NAME!;
   const region = process.env.AWS_REGION!;
   const accountId = process.env.ACCOUNT_ID!;
 
@@ -83,7 +85,21 @@ export async function handler(): Promise<void> {
     );
     console.log(`Updated API Gateway resource policy with ${cidrBlocks.length} CIDR blocks`);
   } catch (err) {
-    // Log but don't throw — previous policy remains active
     console.error("Failed to update API Gateway resource policy:", err);
+    throw err;
+  }
+
+  // Resource policy changes take effect only after the API is redeployed.
+  try {
+    await apigateway.send(
+      new CreateDeploymentCommand({
+        restApiId,
+        stageName,
+      })
+    );
+    console.log(`Deployed API Gateway resource policy to stage ${stageName}`);
+  } catch (err) {
+    console.error("Failed to deploy API Gateway resource policy:", err);
+    throw err;
   }
 }
