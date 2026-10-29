@@ -58,7 +58,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       ssm.StringParameter.valueFromLookup(this, parameterName, defaultValue);
 
     // -------------------------------------------------------------------------
-    // VPC — single public subnet, no NAT Gateway
+    // VPC — public subnets in every AZ, no NAT Gateway
     // -------------------------------------------------------------------------
     const vpc = new ec2.Vpc(this, "RunnerVpc", {
       maxAzs: 1,
@@ -71,6 +71,36 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         },
       ],
     });
+
+    // The original subnet (logical ID RunnerVpcpublicSubnet1Subnet740263F6) fills
+    // the VPC's whole primary range and must never change, or CloudFormation
+    // tries to replace it on upgrade. Every other AZ gets a /21 carved from a
+    // secondary CIDR instead, positioned by the AZ's letter so a subnet keeps
+    // its CIDR and construct ID if AZs are added or removed. Local and Wavelength
+    // Zones (e.g. us-east-1-bos-1a) don't match the pattern and are skipped.
+    const secondaryCidr = new ec2.CfnVPCCidrBlock(this, "RunnerVpcSecondaryCidr", {
+      vpcId: vpc.vpcId,
+      cidrBlock: "10.1.0.0/16",
+    });
+    const extraSubnets = this.availabilityZones
+      .filter((az) => new RegExp(`^${this.region}[a-z]$`).test(az))
+      .filter((az) => az !== vpc.availabilityZones[0])
+      .map((az) => {
+        const letter = az.slice(-1);
+        const letterIndex = letter.charCodeAt(0) - "a".charCodeAt(0);
+        const subnet = new ec2.PublicSubnet(this, `RunnerSubnet${letter.toUpperCase()}`, {
+          vpcId: vpc.vpcId,
+          availabilityZone: az,
+          cidrBlock: `10.1.${8 * letterIndex}.0/21`,
+          mapPublicIpOnLaunch: true,
+        });
+        subnet.addDefaultInternetRoute(vpc.internetGatewayId!, vpc.internetConnectivityEstablished);
+        subnet.node.addDependency(secondaryCidr);
+        return subnet;
+      });
+    const runnerSubnetIds = [vpc.publicSubnets[0], ...extraSubnets]
+      .map((subnet) => subnet.subnetId)
+      .join(",");
 
     const runnerSecurityGroup = new ec2.SecurityGroup(this, "RunnerSg", {
       vpc,
@@ -230,7 +260,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         WEBHOOK_SECRET_PARAM: SSM_WEBHOOK_SECRET,
         TARGET_TYPE_PARAM: SSM_TARGET_TYPE,
         TARGET_SLUG_PARAM: SSM_TARGET_SLUG,
-        SUBNET_ID: vpc.publicSubnets[0].subnetId,
+        SUBNET_IDS: runnerSubnetIds,
         SECURITY_GROUP_ID: runnerSecurityGroup.securityGroupId,
         INSTANCE_PROFILE_ARN: instanceProfile.attrArn,
         AMI_NAME_PARAM: SSM_AMI_NAME,
@@ -511,7 +541,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         SPOT_REQUIRED_PARAM: SSM_SPOT_REQUIRED,
         AMI_NAME_PARAM: SSM_AMI_NAME,
         AMI_OWNERS_PARAM: SSM_AMI_OWNERS,
-        SUBNET_ID: vpc.publicSubnets[0].subnetId,
+        SUBNET_IDS: runnerSubnetIds,
         SECURITY_GROUP_ID: runnerSecurityGroup.securityGroupId,
         INSTANCE_PROFILE_ARN: instanceProfile.attrArn,
         QUEUED_JOBS_TABLE: queuedJobsTable.tableName,
