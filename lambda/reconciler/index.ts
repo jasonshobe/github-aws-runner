@@ -252,6 +252,7 @@ export async function handler(): Promise<void> {
         targetType: params.targetType,
         targetSlug: params.targetSlug,
         githubToken: params.githubToken,
+        market: "on-demand",
       });
       launched++;
     } catch (err) {

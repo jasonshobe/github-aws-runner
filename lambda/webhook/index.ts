@@ -356,6 +356,7 @@ export async function handler(
     targetType,
     targetSlug,
     githubToken,
+    market: "on-demand",
   });
 
   return { statusCode: 200, body: "OK" };

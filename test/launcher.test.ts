@@ -2,7 +2,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildUserData } from "../lambda/shared/launcher";
+import { DescribeImagesCommand, RunInstancesCommand, EC2Client } from "@aws-sdk/client-ec2";
+import { buildUserData, launchRunner, type LaunchRequest } from "../lambda/shared/launcher";
+import { SpotCapacityError } from "../lambda/shared/spot";
 
 // Execute the generated bootstrap with simulated devices and commands. A closed
 // PATH keeps the test from invoking real disk, user, runner, or shutdown tools.
@@ -179,5 +181,103 @@ describe("runner bootstrap root filesystem growth", () => {
       status: 1,
       trace: ["shutdown"],
     });
+  });
+});
+
+describe("launchRunner", () => {
+  const originalEnv = process.env;
+  let runInstances: jest.Mock;
+  let fetchMock: jest.SpyInstance;
+
+  const request = (market: LaunchRequest["market"]): LaunchRequest => ({
+    jobId: "100",
+    runnerName: "aws-runner-100",
+    labels: ["self-hosted"],
+    instanceType: "c7a.large",
+    ebsSizeGb: 50,
+    timeoutMinutes: 60,
+    targetType: "repo",
+    targetSlug: "o/r",
+    githubToken: "tok",
+    market,
+  });
+
+  const runInput = () => runInstances.mock.calls[0][0].input;
+  const tags = () => runInput().TagSpecifications[0].Tags;
+  const deleteCalls = () =>
+    fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE");
+
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      SUBNET_ID: "subnet-1",
+      SECURITY_GROUP_ID: "sg-1",
+      INSTANCE_PROFILE_ARN: "arn:aws:iam::123456789012:instance-profile/p",
+    };
+    runInstances = jest.fn().mockResolvedValue({ Instances: [{ InstanceId: "i-1" }] });
+    jest.spyOn(EC2Client.prototype, "send").mockImplementation(((command: unknown) => {
+      if (command instanceof DescribeImagesCommand) {
+        return Promise.resolve({ Images: [{ ImageId: "ami-1", CreationDate: "2026-01-01" }] });
+      }
+      if (command instanceof RunInstancesCommand) return runInstances(command);
+      return Promise.reject(new Error("unexpected command"));
+    }) as never);
+    fetchMock = jest.spyOn(global, "fetch").mockImplementation((async (_url: unknown, init?: RequestInit) =>
+      init?.method === "DELETE"
+        ? new Response(null, { status: 204 })
+        : new Response(JSON.stringify({ runner: { id: 42 }, encoded_jit_config: "cfg" }), { status: 201 })) as never);
+    jest.spyOn(console, "log").mockImplementation(() => {});
+    jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    jest.restoreAllMocks();
+  });
+
+  it("launches On-Demand without InstanceMarketOptions", async () => {
+    await launchRunner(request("on-demand"));
+
+    expect(runInput()).not.toHaveProperty("InstanceMarketOptions");
+    expect(tags()).toContainEqual({ Key: "github-aws-runner:market", Value: "on-demand" });
+  });
+
+  it("launches Spot as a one-time request with no price cap", async () => {
+    await launchRunner(request("spot"));
+
+    expect(runInput().InstanceMarketOptions).toEqual({
+      MarketType: "spot",
+      SpotOptions: { SpotInstanceType: "one-time", InstanceInterruptionBehavior: "terminate" },
+    });
+    expect(tags()).toContainEqual({ Key: "github-aws-runner:market", Value: "spot" });
+  });
+
+  it("turns a Spot capacity refusal into SpotCapacityError and deletes the JIT registration", async () => {
+    runInstances.mockRejectedValue(Object.assign(new Error("no capacity"), { name: "InsufficientInstanceCapacity" }));
+
+    await expect(launchRunner(request("spot"))).rejects.toBeInstanceOf(SpotCapacityError);
+
+    const deletes = deleteCalls();
+    expect(deletes).toHaveLength(1);
+    expect(String(deletes[0][0])).toMatch(/\/42$/);
+  });
+
+  it("still throws SpotCapacityError when deleting the registration fails", async () => {
+    runInstances.mockRejectedValue(Object.assign(new Error("no capacity"), { name: "InsufficientInstanceCapacity" }));
+    fetchMock.mockImplementation((async (_url: unknown, init?: RequestInit) =>
+      init?.method === "DELETE"
+        ? new Response("boom", { status: 500 })
+        : new Response(JSON.stringify({ runner: { id: 42 }, encoded_jit_config: "cfg" }), { status: 201 })) as never);
+
+    await expect(launchRunner(request("spot"))).rejects.toBeInstanceOf(SpotCapacityError);
+    expect(deleteCalls()).toHaveLength(1);
+  });
+
+  it("passes non-capacity errors through", async () => {
+    const err = Object.assign(new Error("denied"), { name: "UnauthorizedOperation" });
+    runInstances.mockRejectedValue(err);
+
+    await expect(launchRunner(request("spot"))).rejects.toBe(err);
+    expect(deleteCalls()).toHaveLength(0);
   });
 });
