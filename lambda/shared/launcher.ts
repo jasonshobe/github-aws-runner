@@ -5,7 +5,13 @@ import {
   ResourceType,
 } from "@aws-sdk/client-ec2";
 import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
-import { generateJitConfig } from "../webhook/github-client";
+import { deleteRunner, generateJitConfig } from "../webhook/github-client";
+import {
+  isSpotCapacityError,
+  SpotCapacityError,
+  TAG_MARKET,
+  type Market,
+} from "./spot";
 import { RUNNER_NAME_PREFIX } from "../reconciler/planner";
 
 const ec2 = new EC2Client({});
@@ -197,6 +203,7 @@ export interface LaunchRequest {
   targetType: string;
   targetSlug: string;
   githubToken: string;
+  market: Market;
 }
 
 /**
@@ -204,7 +211,7 @@ export interface LaunchRequest {
  * Returns the instance ID.
  */
 export async function launchRunner(req: LaunchRequest): Promise<string> {
-  const { encodedJitConfig } = await generateJitConfig(
+  const { runnerId, encodedJitConfig } = await generateJitConfig(
     req.runnerName,
     req.targetType,
     req.targetSlug,
@@ -213,7 +220,9 @@ export async function launchRunner(req: LaunchRequest): Promise<string> {
   );
   console.log(`Generated JIT config ${req.runnerName} for job ${req.jobId}`);
 
-  const result = await ec2.send(
+  let result;
+  try {
+    result = await ec2.send(
     new RunInstancesCommand({
       ImageId: await resolveAmiId(),
       InstanceType: req.instanceType as never,
@@ -224,6 +233,15 @@ export async function launchRunner(req: LaunchRequest): Promise<string> {
       IamInstanceProfile: { Arn: process.env.INSTANCE_PROFILE_ARN! },
       UserData: buildUserData(encodedJitConfig, process.env.CACHE_BUCKET_NAME),
       InstanceInitiatedShutdownBehavior: "terminate",
+      ...(req.market === "spot" && {
+        InstanceMarketOptions: {
+          MarketType: "spot",
+          SpotOptions: {
+            SpotInstanceType: "one-time",
+            InstanceInterruptionBehavior: "terminate",
+          },
+        },
+      }),
       BlockDeviceMappings: [
         {
           DeviceName: "/dev/sda1",
@@ -244,11 +262,37 @@ export async function launchRunner(req: LaunchRequest): Promise<string> {
             { Key: TAG_JOB_ID, Value: req.jobId },
             { Key: TAG_TIMEOUT_MINUTES, Value: String(req.timeoutMinutes) },
             { Key: TAG_RUNNER_NAME, Value: req.runnerName },
+            { Key: TAG_MARKET, Value: req.market },
           ],
         },
       ],
     })
-  );
+    );
+  } catch (err) {
+    if (req.market === "spot" && isSpotCapacityError(err)) {
+      // The JIT runner was minted but will never get an instance. Remove it so
+      // it doesn't linger as an offline registration; the reconciler's prune
+      // would catch it eventually, so a failure here is only logged.
+      try {
+        await deleteRunner(
+          req.targetType,
+          req.targetSlug,
+          runnerId,
+          req.githubToken
+        );
+      } catch (deleteErr) {
+        console.error(
+          `Failed to delete runner ${req.runnerName} after Spot refusal:`,
+          deleteErr
+        );
+      }
+      throw new SpotCapacityError(
+        `Spot capacity unavailable for ${req.instanceType} (runner ${req.runnerName})`,
+        err
+      );
+    }
+    throw err;
+  }
 
   const instanceId = result.Instances?.[0]?.InstanceId ?? "unknown";
   console.log(

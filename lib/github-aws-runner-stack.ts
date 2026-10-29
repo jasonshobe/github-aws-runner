@@ -51,6 +51,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const SSM_RECONCILER_GRACE_SECONDS = `${p}/reconciler-grace-seconds`;
     const SSM_RECONCILER_BOOT_GRACE    = `${p}/reconciler-boot-grace-seconds`;
     const SSM_RECONCILER_MAX_TOP_UPS   = `${p}/reconciler-max-top-ups`;
+    const SSM_SPOT_ENABLED             = `${p}/spot-enabled`;
+    const SSM_SPOT_REQUIRED            = `${p}/spot-required`;
     const lambdaExternalModules = ["@aws-sdk/*"];
     const optionalLookup = (parameterName: string, defaultValue = "") =>
       ssm.StringParameter.valueFromLookup(this, parameterName, defaultValue);
@@ -240,6 +242,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         ALLOWED_INSTANCE_TYPES_PARAM: SSM_ALLOWED_INSTANCE_TYPES,
         MAX_EBS_VOLUME_SIZE_PARAM: SSM_MAX_EBS_VOLUME_SIZE,
         RUNNER_TIMEOUT_PARAM: SSM_RUNNER_TIMEOUT,
+        SPOT_ENABLED_PARAM: SSM_SPOT_ENABLED,
+        SPOT_REQUIRED_PARAM: SSM_SPOT_REQUIRED,
         QUEUED_JOBS_TABLE: queuedJobsTable.tableName,
       },
     });
@@ -263,6 +267,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_RUNNER_TIMEOUT),
           ssmArn(this, SSM_AMI_NAME),
           ssmArn(this, SSM_AMI_OWNERS),
+          ssmArn(this, SSM_SPOT_ENABLED),
+          ssmArn(this, SSM_SPOT_REQUIRED),
         ],
       })
     );
@@ -302,6 +308,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           `arn:aws:ec2:${this.region}:${this.account}:security-group/*`,
           `arn:aws:ec2:${this.region}:${this.account}:subnet/*`,
           `arn:aws:ec2:${this.region}:${this.account}:volume/*`,
+          // Spot launches also reference a spot-instances-request resource.
+          `arn:aws:ec2:${this.region}:${this.account}:spot-instances-request/*`,
         ],
       })
     );
@@ -322,6 +330,21 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["iam:PassRole"],
         resources: [instanceRole.roleArn],
+      })
+    );
+
+    // The first Spot launch in an account creates AWSServiceRoleForEC2Spot.
+    // Scoped to the Spot service so this cannot create any other
+    // service-linked role.
+    webhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:CreateServiceLinkedRole"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "iam:AWSServiceName": "spot.amazonaws.com",
+          },
+        },
       })
     );
 
@@ -484,6 +507,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
         RECONCILER_GRACE_SECONDS_PARAM: SSM_RECONCILER_GRACE_SECONDS,
         RECONCILER_BOOT_GRACE_SECONDS_PARAM: SSM_RECONCILER_BOOT_GRACE,
         RECONCILER_MAX_TOP_UPS_PARAM: SSM_RECONCILER_MAX_TOP_UPS,
+        SPOT_ENABLED_PARAM: SSM_SPOT_ENABLED,
+        SPOT_REQUIRED_PARAM: SSM_SPOT_REQUIRED,
         AMI_NAME_PARAM: SSM_AMI_NAME,
         AMI_OWNERS_PARAM: SSM_AMI_OWNERS,
         SUBNET_ID: vpc.publicSubnets[0].subnetId,
@@ -513,6 +538,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           ssmArn(this, SSM_RECONCILER_MAX_TOP_UPS),
           ssmArn(this, SSM_AMI_NAME),
           ssmArn(this, SSM_AMI_OWNERS),
+          ssmArn(this, SSM_SPOT_ENABLED),
+          ssmArn(this, SSM_SPOT_REQUIRED),
         ],
       })
     );
@@ -547,6 +574,8 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           `arn:aws:ec2:${this.region}:${this.account}:security-group/*`,
           `arn:aws:ec2:${this.region}:${this.account}:subnet/*`,
           `arn:aws:ec2:${this.region}:${this.account}:volume/*`,
+          // Spot launches also reference a spot-instances-request resource.
+          `arn:aws:ec2:${this.region}:${this.account}:spot-instances-request/*`,
         ],
       })
     );
@@ -567,6 +596,21 @@ export class GithubAwsRunnerStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["iam:PassRole"],
         resources: [instanceRole.roleArn],
+      })
+    );
+
+    // The first Spot launch in an account creates AWSServiceRoleForEC2Spot.
+    // Scoped to the Spot service so this cannot create any other
+    // service-linked role.
+    reconcilerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:CreateServiceLinkedRole"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "iam:AWSServiceName": "spot.amazonaws.com",
+          },
+        },
       })
     );
 
