@@ -15,7 +15,7 @@ function buildTemplate(parameters: Record<string, string> = {}, prefix = "/githu
   }
   app.node.setContext(
     "availability-zones:account=123456789012:region=us-east-1",
-    ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1-bos-1a"]
+    ["us-east-1a", "us-east-1c", "us-east-1-bos-1a", "us-east-1b"]
   );
   const stack = new GithubAwsRunnerStack(app, "TestStack", {
     initialWebhookIps: FAKE_WEBHOOK_IPS,
@@ -68,6 +68,16 @@ describe("GithubAwsRunnerStack", () => {
     for (const fn of fns as any[]) {
       expect(fn.Properties.Environment.Variables.SUBNET_IDS).toBeDefined();
       expect(fn.Properties.Environment.Variables.SUBNET_ID).toBeUndefined();
+      // Subnet 1 first, then the extras in AZ-letter order whatever order the AZs arrive in.
+      const subnets = template.findResources("AWS::EC2::Subnet");
+      const logicalIdFor = (az: string) =>
+        Object.keys(subnets).find((id) => subnets[id].Properties.AvailabilityZone === az);
+      const refs = fn.Properties.Environment.Variables.SUBNET_IDS["Fn::Join"][1];
+      expect(refs).toEqual([
+        { Ref: "RunnerVpcpublicSubnet1Subnet740263F6" },
+        { Ref: logicalIdFor("us-east-1b") },
+        { Ref: logicalIdFor("us-east-1c") },
+      ]);
     }
   });
 

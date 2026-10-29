@@ -85,6 +85,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
     const extraSubnets = this.availabilityZones
       .filter((az) => new RegExp(`^${this.region}[a-z]$`).test(az))
       .filter((az) => az !== vpc.availabilityZones[0])
+      .sort()
       .map((az) => {
         const letter = az.slice(-1);
         const letterIndex = letter.charCodeAt(0) - "a".charCodeAt(0);
