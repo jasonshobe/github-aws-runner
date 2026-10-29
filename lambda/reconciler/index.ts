@@ -152,6 +152,34 @@ async function describeLiveInstances(): Promise<LiveInstance[]> {
   return instances;
 }
 
+/**
+ * Bounds how many replacements a single job can consume when every one of them
+ * fails, whether at launch or by never coming online. Never throws, so a
+ * bookkeeping failure is never reported as a failed launch.
+ */
+async function recordTopUp(jobId: string): Promise<void> {
+  try {
+    await dynamo.send(
+      new UpdateItemCommand({
+        TableName: process.env.QUEUED_JOBS_TABLE!,
+        Key: { jobId: { S: jobId } },
+        UpdateExpression: "SET topUps = if_not_exists(topUps, :zero) + :one",
+        // No-op if the row has since been deleted because the job started.
+        ConditionExpression: "attribute_exists(jobId)",
+        ExpressionAttributeValues: { ":zero": { N: "0" }, ":one": { N: "1" } },
+      })
+    );
+  } catch (err) {
+    const name = (err as { name?: string }).name;
+    if (name !== "ConditionalCheckFailedException") {
+      console.error(
+        `Reconciler: could not record the top-up count for job ${jobId}`,
+        err
+      );
+    }
+  }
+}
+
 export async function handler(): Promise<void> {
   const params = await getParams();
 
@@ -299,6 +327,7 @@ export async function handler(): Promise<void> {
         market,
       });
       launched++;
+      await recordTopUp(job.jobId);
     } catch (err) {
       if (err instanceof SpotCapacityError) {
         spotRefusedTypes.add(instanceType);
@@ -310,31 +339,10 @@ export async function handler(): Promise<void> {
       }
       // One failed top-up must not stop the rest of the backlog being covered.
       console.error(`Reconciler: failed to launch a runner for job ${job.jobId}`, err);
+      // A launch that fails every pass would otherwise be retried until the
+      // row's TTL, so it spends the job's top-up budget like a dead runner does.
+      await recordTopUp(job.jobId);
       continue;
-    }
-
-    // Bounds how many replacements a single job can consume when every one of
-    // them also fails to come online. Kept out of the launch try/catch so a
-    // bookkeeping failure is never reported as a failed launch.
-    try {
-      await dynamo.send(
-        new UpdateItemCommand({
-          TableName: process.env.QUEUED_JOBS_TABLE!,
-          Key: { jobId: { S: job.jobId } },
-          UpdateExpression: "SET topUps = if_not_exists(topUps, :zero) + :one",
-          // No-op if the row has since been deleted because the job started.
-          ConditionExpression: "attribute_exists(jobId)",
-          ExpressionAttributeValues: { ":zero": { N: "0" }, ":one": { N: "1" } },
-        })
-      );
-    } catch (err) {
-      const name = (err as { name?: string }).name;
-      if (name !== "ConditionalCheckFailedException") {
-        console.error(
-          `Reconciler: could not record the top-up count for job ${job.jobId}`,
-          err
-        );
-      }
     }
   }
 
