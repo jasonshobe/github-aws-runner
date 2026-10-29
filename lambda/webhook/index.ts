@@ -12,6 +12,12 @@ import {
 } from "@aws-sdk/client-ssm";
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { buildRunnerName, launchRunner, TAG_MANAGED } from "../shared/launcher";
+import {
+  parseSpotSettings,
+  resolveMarket,
+  SpotCapacityError,
+  type SpotSettings,
+} from "../shared/spot";
 
 const ec2 = new EC2Client({});
 const ssm = new SSMClient({});
@@ -38,6 +44,7 @@ let cachedParams:
       runnerLabel: string | undefined;
       allowedInstanceTypes: string[] | undefined;
       maxEbsVolumeSizeGb: number | undefined;
+      spotSettings: SpotSettings;
     }
   | undefined;
 
@@ -68,6 +75,8 @@ async function getParams(): Promise<NonNullable<typeof cachedParams>> {
         process.env.RUNNER_LABEL_PARAM!,
         process.env.ALLOWED_INSTANCE_TYPES_PARAM!,
         process.env.MAX_EBS_VOLUME_SIZE_PARAM!,
+        process.env.SPOT_ENABLED_PARAM!,
+        process.env.SPOT_REQUIRED_PARAM!,
       ],
       WithDecryption: true,
     })
@@ -97,6 +106,11 @@ async function getParams(): Promise<NonNullable<typeof cachedParams>> {
       ? allowedRaw.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined,
     maxEbsVolumeSizeGb: maxEbsRaw ? parseInt(maxEbsRaw, 10) : undefined,
+    // Both optional — parseSpotSettings supplies the defaults when absent.
+    spotSettings: parseSpotSettings(
+      byName[process.env.SPOT_ENABLED_PARAM!],
+      byName[process.env.SPOT_REQUIRED_PARAM!]
+    ),
   };
   return cachedParams;
 }
@@ -277,6 +291,7 @@ export async function handler(
     runnerLabel,
     allowedInstanceTypes,
     maxEbsVolumeSizeGb,
+    spotSettings,
   } = await getParams();
 
   if (runnerLabel && !payload.workflow_job.labels.includes(runnerLabel)) {
@@ -285,6 +300,15 @@ export async function handler(
     );
     return { statusCode: 200, body: "OK" };
   }
+
+  // A policy conflict (e.g. spot:true while Spot is disabled) is final: we never
+  // switch markets for a job, so there is nothing for the reconciler to retry.
+  const decision = resolveMarket(payload.workflow_job.labels, spotSettings);
+  if ("reject" in decision) {
+    console.warn(`Job ${jobId} not launched: ${decision.reject}`);
+    return { statusCode: 200, body: "OK" };
+  }
+  const market = decision.market;
 
   // Resolve instance type, EBS size, and timeout from labels (with SSM defaults and constraints)
   const resolvedInstanceType = resolveInstanceType(
@@ -305,7 +329,7 @@ export async function handler(
 
   console.log(
     `Processing workflow_job.queued event for job ${jobId} ` +
-      `(instance-type=${resolvedInstanceType}, disk=${resolvedEbsSize}GB, timeout=${resolvedTimeoutMinutes}m)`
+      `(instance-type=${resolvedInstanceType}, disk=${resolvedEbsSize}GB, timeout=${resolvedTimeoutMinutes}m, market=${market})`
   );
 
   const runnerName = buildRunnerName(jobId);
@@ -325,6 +349,8 @@ export async function handler(
         ...(payload.repository?.full_name
           ? { repo: { S: payload.repository.full_name } }
           : {}),
+        // The reconciler launches top-ups on this market and never converts it.
+        market: { S: market },
         instanceType: { S: resolvedInstanceType },
         ebsSizeGb: { N: String(resolvedEbsSize) },
         timeoutMinutes: { N: String(resolvedTimeoutMinutes) },
@@ -346,18 +372,30 @@ export async function handler(
     return { statusCode: 200, body: "OK" };
   }
 
-  await launchRunner({
-    jobId,
-    runnerName,
-    labels: payload.workflow_job.labels,
-    instanceType: resolvedInstanceType,
-    ebsSizeGb: resolvedEbsSize,
-    timeoutMinutes: resolvedTimeoutMinutes,
-    targetType,
-    targetSlug,
-    githubToken,
-    market: "on-demand",
-  });
+  try {
+    await launchRunner({
+      jobId,
+      runnerName,
+      labels: payload.workflow_job.labels,
+      instanceType: resolvedInstanceType,
+      ebsSizeGb: resolvedEbsSize,
+      timeoutMinutes: resolvedTimeoutMinutes,
+      targetType,
+      targetSlug,
+      githubToken,
+      market,
+    });
+  } catch (err) {
+    if (err instanceof SpotCapacityError) {
+      // The row is already recorded, so the reconciler retries once Spot
+      // capacity returns; failing the delivery would only make GitHub redeliver.
+      console.warn(
+        `Job ${jobId} is waiting for Spot capacity; the reconciler will retry`
+      );
+      return { statusCode: 200, body: "OK" };
+    }
+    throw err;
+  }
 
   return { statusCode: 200, body: "OK" };
 }
