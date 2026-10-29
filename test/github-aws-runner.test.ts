@@ -72,7 +72,7 @@ describe("GithubAwsRunnerStack", () => {
       const subnets = template.findResources("AWS::EC2::Subnet");
       const logicalIdFor = (az: string) =>
         Object.keys(subnets).find((id) => subnets[id].Properties.AvailabilityZone === az);
-      const refs = fn.Properties.Environment.Variables.SUBNET_IDS["Fn::Join"][1];
+      const refs = fn.Properties.Environment.Variables.SUBNET_IDS["Fn::Join"][1].filter((part: unknown) => part !== ",");
       expect(refs).toEqual([
         { Ref: "RunnerVpcpublicSubnet1Subnet740263F6" },
         { Ref: logicalIdFor("us-east-1b") },
