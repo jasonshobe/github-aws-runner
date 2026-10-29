@@ -34,6 +34,23 @@ describe("planLaunches", () => {
     });
 
     expect(plan.launchFor.map((j) => j.jobId)).toEqual(["100"]);
+    expect(plan.overflow).toEqual([]);
+  });
+
+  it("returns uncovered jobs beyond free capacity as overflow, oldest first", () => {
+    const plan = planLaunches({
+      queuedJobs: [job("c", 10), job("a", 30), job("b", 20)],
+      runners: [],
+      liveInstances: [],
+      maxConcurrentRunners: 1,
+      graceMs: 2 * MINUTE,
+      bootGraceMs: BOOT_GRACE,
+      maxTopUps: 3,
+      now: NOW,
+    });
+
+    expect(plan.launchFor.map((j) => j.jobId)).toEqual(["a"]);
+    expect(plan.overflow.map((j) => j.jobId)).toEqual(["b", "c"]);
   });
 
   it("ignores a queued job still inside the grace period", () => {

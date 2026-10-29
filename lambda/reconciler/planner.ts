@@ -1,3 +1,5 @@
+import type { Market } from "../shared/spot";
+
 /**
  * Pure decision logic for the reconciler.
  *
@@ -33,6 +35,8 @@ export interface QueuedJob {
   instanceType?: string;
   ebsSizeGb?: number;
   timeoutMinutes?: number;
+  /** Market chosen when the job was queued; absent on rows from before Spot. */
+  market?: Market;
 }
 
 /** A runner registration as returned by the GitHub runners API. */
@@ -76,6 +80,11 @@ export interface PlanInput {
 export interface Plan {
   /** Jobs to mint a replacement runner and instance for, oldest first. */
   launchFor: QueuedJob[];
+  /**
+   * Uncovered stale jobs beyond free capacity, oldest first. The caller uses
+   * them to refill a slot freed by a refused Spot launch.
+   */
+  overflow: QueuedJob[];
   /**
    * Instances that are running but were not counted as capacity because their
    * runner never came online. Reported so the reason a top-up happened is
@@ -159,8 +168,6 @@ export function planLaunches(input: PlanInput): Plan {
     return false;
   });
 
-  const shortfall = uncovered.length;
-
   // Never exceed the same cap the webhook enforces.
   const freeCapacity = Math.max(
     0,
@@ -170,7 +177,8 @@ export function planLaunches(input: PlanInput): Plan {
   const usableIds = new Set(usableInstances.map((i) => i.instanceId));
 
   return {
-    launchFor: uncovered.slice(0, Math.min(shortfall, freeCapacity)),
+    launchFor: uncovered.slice(0, freeCapacity),
+    overflow: uncovered.slice(freeCapacity),
     discountedInstanceIds: input.liveInstances
       .filter((i) => !usableIds.has(i.instanceId))
       .map((i) => i.instanceId),
