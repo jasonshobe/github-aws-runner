@@ -60,6 +60,17 @@ describe("GithubAwsRunnerStack", () => {
       { DestinationCidrBlock: "0.0.0.0/0", GatewayId: Match.anyValue() }, 3);
   });
 
+  test("extra subnet routes wait for the IGW attachment and the secondary CIDR", () => {
+    const attachmentId = Object.keys(template.findResources("AWS::EC2::VPCGatewayAttachment"))[0];
+    const cidrId = Object.keys(template.findResources("AWS::EC2::VPCCidrBlock"))[0];
+    const routes = Object.entries(template.findResources("AWS::EC2::Route"))
+      .filter(([id]) => /^RunnerSubnet[A-Z]DefaultRoute/.test(id));
+    expect(routes).toHaveLength(2);
+    for (const [, route] of routes) {
+      expect(route.DependsOn).toEqual(expect.arrayContaining([attachmentId, cidrId]));
+    }
+  });
+
   test("webhook and reconciler Lambdas receive SUBNET_IDS instead of SUBNET_ID", () => {
     const fns = Object.values(template.findResources("AWS::Lambda::Function")).filter(
       (f: any) => f.Properties?.Environment?.Variables?.SPOT_ENABLED_PARAM !== undefined

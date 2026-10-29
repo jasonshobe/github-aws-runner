@@ -95,7 +95,7 @@ export class GithubAwsRunnerStack extends cdk.Stack {
           cidrBlock: `10.1.${8 * letterIndex}.0/21`,
           mapPublicIpOnLaunch: true,
         });
-        subnet.addDefaultInternetRoute(vpc.internetGatewayId!, vpc.internetConnectivityEstablished);
+        subnet.addDefaultInternetRoute(vpc.internetGatewayId!, vpc.node.findChild("VPCGW"));
         subnet.node.addDependency(secondaryCidr);
         return subnet;
       });
