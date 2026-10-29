@@ -103,6 +103,7 @@ Webhook code doesn't change. The webhook and the reconciler each still see one `
 - The `launched` counter still counts only successful launches.
 - Once `topUps` reaches `reconciler-max-top-ups` (default 3), the planner stops selecting the job, exactly as it does for runners that never come online. The job stays queued in GitHub until it is cancelled or the row's TTL expires.
 - Accepted cost: three transient failures in a row, such as API throttling, also exhaust the job's top-ups. The cap already accepts this risk for runners that never come online.
+- Account quota errors (`VcpuLimitExceeded`, `InstanceLimitExceeded`, matched by `isLaunchQuotaError`) are waits and don't count, like a Spot capacity wait. The slot is still consumed, with no refill.
 - Keep the increment out of the launch `try/catch`, as it is today, so a bookkeeping failure is never reported as a failed launch. A small helper shared by both paths fits.
 
 **Call budget** *(my call: no new limits)*. A refused `RunInstances` returns quickly, so even a 6-AZ region adds a few seconds at most.
@@ -145,7 +146,7 @@ Webhook code doesn't change. The webhook and the reconciler each still see one `
 
 ## Upgrade / backward compatibility
 
-A redeploy creates the CIDR block, subnets, route tables, routes and associations, and changes two Lambda environment variables. It replaces or deletes nothing, so runners in flight are unaffected. A rollback deletes only the new resources. That would fail for any subnet that still holds a runner, but the existing deployment keeps working, because CloudFormation retries the cleanup.
+A redeploy creates the CIDR block, subnets, route tables, routes and associations, and changes two Lambda environment variables. It replaces or deletes nothing, so runners in flight are unaffected. A rollback deletes only the new resources. That would fail for any subnet that still holds a runner. The existing deployment keeps working, but a rollback that cannot delete a subnet still holding a runner leaves that subnet and the CIDR association orphaned (`DependencyViolation`), and the next deploy then fails creating them until they are deleted by hand.
 
 Runtime behaviour changes for upgraded deployments, by the user's decision:
 - Runners can land in any AZ.

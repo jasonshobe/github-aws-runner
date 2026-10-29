@@ -321,6 +321,22 @@ describe("launchRunner", () => {
     expect(deleteCalls()).toHaveLength(1);
   });
 
+  it("On-Demand stops at a regional error after a zonal refusal", async () => {
+    runInstances.mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
+      .mockRejectedValueOnce(err("VcpuLimitExceeded"));
+    await expect(launchRunner(request("on-demand"))).rejects.toMatchObject({ name: "VcpuLimitExceeded" });
+    expect(subnetsTried()).toHaveLength(2);
+    expect(deleteCalls()).toHaveLength(0);
+  });
+
+  it("Spot stops at a quota wait after a zonal refusal", async () => {
+    runInstances.mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
+      .mockRejectedValueOnce(err("MaxSpotInstanceCountExceeded"));
+    await expect(launchRunner(request("spot"))).rejects.toBeInstanceOf(SpotCapacityError);
+    expect(subnetsTried()).toHaveLength(2);
+    expect(deleteCalls()).toHaveLength(1);
+  });
+
   it("Spot refused everywhere with a mix of Unsupported and capacity waits", async () => {
     runInstances.mockRejectedValueOnce(err("Unsupported"))
       .mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
