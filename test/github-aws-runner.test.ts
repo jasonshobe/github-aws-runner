@@ -242,11 +242,38 @@ describe("GithubAwsRunnerStack", () => {
               "arn:aws:ec2:us-east-1:123456789012:security-group/*",
               "arn:aws:ec2:us-east-1:123456789012:subnet/*",
               "arn:aws:ec2:us-east-1:123456789012:volume/*",
+              "arn:aws:ec2:us-east-1:123456789012:spot-instances-request/*",
             ]),
           }),
         ]),
       },
     });
+  });
+
+  test("webhook and reconciler Lambdas receive the Spot parameter names", () => {
+    const fns = Object.values(template.findResources("AWS::Lambda::Function")).filter(
+      (f: any) =>
+        f.Properties?.Environment?.Variables?.SPOT_ENABLED_PARAM === "/github-aws-runner/spot-enabled" &&
+        f.Properties?.Environment?.Variables?.SPOT_REQUIRED_PARAM === "/github-aws-runner/spot-required"
+    );
+    expect(fns).toHaveLength(2);
+  });
+
+  test("launching Lambdas may create only the EC2 Spot service-linked role", () => {
+    const policies = Object.values(template.findResources("AWS::IAM::Policy")).filter((p: any) =>
+      (p.Properties.PolicyDocument.Statement as any[]).some(
+        (st) =>
+          st.Action === "iam:CreateServiceLinkedRole" &&
+          st.Condition?.StringEquals?.["iam:AWSServiceName"] === "spot.amazonaws.com"
+      )
+    );
+    expect(policies).toHaveLength(2);
+  });
+
+  test("launching Lambdas may read the Spot SSM parameters", () => {
+    const json = JSON.stringify(template.findResources("AWS::IAM::Policy"));
+    expect(json.split(":parameter/github-aws-runner/spot-enabled").length - 1).toBe(2);
+    expect(json.split(":parameter/github-aws-runner/spot-required").length - 1).toBe(2);
   });
 });
 
