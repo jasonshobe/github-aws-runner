@@ -13,6 +13,10 @@ function buildTemplate(parameters: Record<string, string> = {}, prefix = "/githu
       value
     );
   }
+  app.node.setContext(
+    "availability-zones:account=123456789012:region=us-east-1",
+    ["us-east-1a", "us-east-1c", "us-east-1-bos-1a", "us-east-1b"]
+  );
   const stack = new GithubAwsRunnerStack(app, "TestStack", {
     initialWebhookIps: FAKE_WEBHOOK_IPS,
     env: { account: "123456789012", region: "us-east-1" },
@@ -27,12 +31,65 @@ describe("GithubAwsRunnerStack", () => {
     template = buildTemplate();
   });
 
-  test("creates a VPC with a public subnet", () => {
+  test("enables DNS on the VPC", () => {
     template.hasResourceProperties("AWS::EC2::VPC", {
       EnableDnsHostnames: true,
       EnableDnsSupport: true,
     });
-    template.resourceCountIs("AWS::EC2::Subnet", 1);
+  });
+
+  test("keeps the original subnet unchanged so upgrades never replace it", () => {
+    const subnets = template.findResources("AWS::EC2::Subnet");
+    expect(subnets.RunnerVpcpublicSubnet1Subnet740263F6.Properties.CidrBlock).toBe("10.0.0.0/16");
+  });
+
+  test("adds a secondary CIDR and one /21 public subnet per extra standard AZ", () => {
+    template.hasResourceProperties("AWS::EC2::VPCCidrBlock", { CidrBlock: "10.1.0.0/16" });
+    template.resourceCountIs("AWS::EC2::Subnet", 3); // 1a (original), 1b, 1c — not the Local Zone
+    template.hasResourceProperties("AWS::EC2::Subnet", {
+      AvailabilityZone: "us-east-1b", CidrBlock: "10.1.8.0/21", MapPublicIpOnLaunch: true,
+    });
+    template.hasResourceProperties("AWS::EC2::Subnet", {
+      AvailabilityZone: "us-east-1c", CidrBlock: "10.1.16.0/21", MapPublicIpOnLaunch: true,
+    });
+  });
+
+  test("routes each extra subnet to the internet gateway", () => {
+    // Original subnet's route plus one per extra subnet.
+    template.resourcePropertiesCountIs("AWS::EC2::Route",
+      { DestinationCidrBlock: "0.0.0.0/0", GatewayId: Match.anyValue() }, 3);
+  });
+
+  test("extra subnet routes wait for the IGW attachment and the secondary CIDR", () => {
+    const attachmentId = Object.keys(template.findResources("AWS::EC2::VPCGatewayAttachment"))[0];
+    const cidrId = Object.keys(template.findResources("AWS::EC2::VPCCidrBlock"))[0];
+    const routes = Object.entries(template.findResources("AWS::EC2::Route"))
+      .filter(([id]) => /^RunnerSubnet[A-Z]DefaultRoute/.test(id));
+    expect(routes).toHaveLength(2);
+    for (const [, route] of routes) {
+      expect(route.DependsOn).toEqual(expect.arrayContaining([attachmentId, cidrId]));
+    }
+  });
+
+  test("webhook and reconciler Lambdas receive SUBNET_IDS instead of SUBNET_ID", () => {
+    const fns = Object.values(template.findResources("AWS::Lambda::Function")).filter(
+      (f: any) => f.Properties?.Environment?.Variables?.SPOT_ENABLED_PARAM !== undefined
+    );
+    expect(fns).toHaveLength(2);
+    for (const fn of fns as any[]) {
+      expect(fn.Properties.Environment.Variables.SUBNET_IDS).toBeDefined();
+      expect(fn.Properties.Environment.Variables.SUBNET_ID).toBeUndefined();
+      // Subnet 1 first, then the extras in AZ-letter order whatever order the AZs arrive in.
+      const subnets = template.findResources("AWS::EC2::Subnet");
+      const logicalIdFor = (az: string) =>
+        Object.keys(subnets).find((id) => subnets[id].Properties.AvailabilityZone === az);
+      const refs = fn.Properties.Environment.Variables.SUBNET_IDS["Fn::Join"][1].filter((part: unknown) => part !== ",");
+      expect(refs).toEqual([
+        { Ref: "RunnerVpcpublicSubnet1Subnet740263F6" },
+        { Ref: logicalIdFor("us-east-1b") },
+        { Ref: logicalIdFor("us-east-1c") },
+      ]);
+    }
   });
 
   test("creates a security group with no ingress rules", () => {

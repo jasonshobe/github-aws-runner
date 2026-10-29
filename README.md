@@ -92,7 +92,7 @@ These parameters do not need to exist in SSM unless you want to override the doc
 | `/github-aws-runner/reconciler-interval-minutes` | String | Reconciler schedule in minutes (default: `2`); requires `npx cdk deploy` to take effect |
 | `/github-aws-runner/reconciler-grace-seconds` | String | How long a job may sit queued before the reconciler launches extra capacity for it (default: `180`) |
 | `/github-aws-runner/reconciler-boot-grace-seconds` | String | How long an instance may run before its runner must be `online` with GitHub for it to still count as capacity (default: `300`) |
-| `/github-aws-runner/reconciler-max-top-ups` | String | Maximum replacement runners the reconciler will launch for a single job (default: `3`) |
+| `/github-aws-runner/reconciler-max-top-ups` | String | Maximum launch attempts the reconciler will make for a single job (failed launches count; Spot capacity and quota waits don't) (default: `3`) |
 | `/github-aws-runner/spot-enabled` | String | Whether jobs may run on Spot instances (default: `true`); `false` forbids Spot. See [Spot Instances](#spot-instances) |
 | `/github-aws-runner/spot-required` | String | Whether every job must run on Spot (default: `false`); ignored when `spot-enabled` is `false`. See [Spot Instances](#spot-instances) |
 | `/github-aws-runner/ami-name` | String | AMI name pattern (default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
@@ -344,7 +344,7 @@ The reconciler closes that gap. The webhook records each queued job in a DynamoD
 
 An instance only counts as capacity while it can still plausibly take a job. Once it has been running longer than `reconciler-boot-grace-seconds`, its runner must actually be `online` with GitHub — an instance whose runner never registered can never be handed work, and counting it would stall the backlog until the watchdog timed the instance out an hour later. Such instances are left for the watchdog to retire rather than terminated outright, so a transient GitHub API blip can never kill a runner that is midway through a job.
 
-`reconciler-max-top-ups` bounds how many replacements a single job can consume. If every replacement also fails to come online — which is what a GitHub-side outage looks like from here — the reconciler stops after that many and logs a warning rather than filling your concurrency budget with useless instances.
+`reconciler-max-top-ups` bounds how many replacements a single job can consume. If every replacement also fails to come online — which is what a GitHub-side outage looks like from here — the reconciler stops after that many and logs a warning rather than filling your concurrency budget with useless instances. A launch that fails (other than a Spot capacity wait or an account vCPU or instance-limit refusal, which are waits and are not counted) also uses up one of the job's top-ups.
 
 To see what it is doing:
 
@@ -353,6 +353,14 @@ aws logs tail /aws/lambda/<stack>-ReconcilerFn<suffix> --follow
 ```
 
 A healthy idle log line reads `Reconciler: runner supply covers the backlog, nothing to launch`.
+
+### Availability Zones
+
+The stack has a public runner subnet in every standard Availability Zone of the region (Local Zones and Wavelength Zones are excluded). Every launch, On-Demand or Spot, starts at a random zone's subnet and tries each zone's subnet once, in round-robin order, until one accepts. A zonal refusal (`InsufficientInstanceCapacity`, `UnfulfillableCapacity`, `SpotMaxPriceTooLow` or `Unsupported`) moves on to the next zone. Any other error stops the attempt at once. When every zone refuses an On-Demand launch, the last refusal is raised as the launch failure and counts toward `reconciler-max-top-ups`, unless it is a vCPU or instance-limit refusal (`VcpuLimitExceeded`, `InstanceLimitExceeded`): those are account quotas, so the job waits for quota and does not count. Spot behaves differently when zones refuse; see [Spot Instances](#spot-instances).
+
+**Upgrade and cost note:** the original subnet keeps the VPC's `10.0.0.0/16` range. A redeploy adds a `10.1.0.0/16` secondary CIDR to the VPC and one `/21` public subnet per extra standard Availability Zone. Existing resources are unchanged and running instances are unaffected, so no drain is needed. `10.1.0.0/16` must not overlap any network the VPC is peered or routed to. The extra subnets cost nothing, provided you do not put anything zonal (a NAT gateway or an interface endpoint) in the runner path.
+
+**Troubleshooting a rolled-back deploy:** if a rolled-back deploy left `RunnerSubnet*` or the `10.1.0.0/16` CIDR association behind, wait for runners in those subnets to exit, delete the orphans, then redeploy.
 
 ### Spot Instances
 
@@ -380,6 +388,8 @@ aws ssm put-parameter \
 
 If `spot-enabled` is `false` and `spot-required` is `true`, disabled wins and a warning is logged. Label matching is case-insensitive, so `spot:TRUE` works. Any other `spot:` value logs a warning and is treated as if the label were absent.
 
+Both parameters are read at runtime, so no redeploy is needed. The webhook caches parameters on each warm Lambda instance, as it does every other runtime parameter, so a change takes effect as each Lambda picks it up. The stack grants the launching Lambdas permission to create the EC2 Spot service-linked role, so the first Spot launch in a fresh account works without manual setup.
+
 What happens to a job, as decided by the webhook when it is queued:
 
 | `spot-enabled` | `spot-required` | Job label | Result |
@@ -402,9 +412,7 @@ The reconciler re-checks policy before every top-up using the market stored on t
 
 Spot launches are one-time requests with no maximum price, so AWS caps the price at the On-Demand price. Instance type, disk and timeout labels work as usual, and `allowed-instance-types` applies to Spot too. Spot instances count toward `max-concurrent-runners`, and each instance is tagged `github-aws-runner:market` as `spot` or `on-demand`.
 
-**Single Availability Zone.** The stack launches every runner into one public subnet, so all runners land in a single Availability Zone. AWS manages Spot capacity per instance type *per zone*, so a Spot request here can't be met from another zone, and capacity refusals are more likely than for a setup spread across zones. When jobs often wait for Spot capacity, try listing several comparable types in `allowed-instance-types` and spreading Spot workflows across them.
-
-Both parameters are read at runtime, so no redeploy is needed. The webhook caches parameters on each warm Lambda instance, as it does every other runtime parameter, so a change takes effect as each Lambda picks it up. The stack grants the launching Lambdas permission to create the EC2 Spot service-linked role, so the first Spot launch in a fresh account works without manual setup.
+**Availability Zones and Spot.** Each Spot launch goes through the zone loop described in [Availability Zones](#availability-zones). Because AWS manages Spot capacity per instance type *per zone*, the job waits only when every zone refused and at least one refusal was a capacity code. `MaxSpotInstanceCountExceeded` is an account-wide quota, so it makes the job wait immediately without trying other zones. If every zone answered `Unsupported`, the launch fails like any other error instead of waiting. When jobs still often wait for Spot capacity, try listing several comparable types in `allowed-instance-types` and spreading Spot workflows across them.
 
 **Upgrade note:** a workflow that already uses a custom runner label spelled `spot:true` or `spot:false` gains the meaning described here.
 

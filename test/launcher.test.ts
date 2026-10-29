@@ -204,13 +204,16 @@ describe("launchRunner", () => {
 
   const runInput = () => runInstances.mock.calls[0][0].input;
   const tags = () => runInput().TagSpecifications[0].Tags;
+  const err = (name: string) => Object.assign(new Error(name), { name });
+  const subnetsTried = () =>
+    runInstances.mock.calls.map((c) => c[0].input.SubnetId);
   const deleteCalls = () =>
     fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE");
 
   beforeEach(() => {
     process.env = {
       ...originalEnv,
-      SUBNET_ID: "subnet-1",
+      SUBNET_IDS: "subnet-a,subnet-b,subnet-c",
       SECURITY_GROUP_ID: "sg-1",
       INSTANCE_PROFILE_ARN: "arn:aws:iam::123456789012:instance-profile/p",
     };
@@ -226,8 +229,10 @@ describe("launchRunner", () => {
       init?.method === "DELETE"
         ? new Response(null, { status: 204 })
         : new Response(JSON.stringify({ runner: { id: 42 }, encoded_jit_config: "cfg" }), { status: 201 })) as never);
+    jest.spyOn(Math, "random").mockReturnValue(0);
     jest.spyOn(console, "log").mockImplementation(() => {});
     jest.spyOn(console, "error").mockImplementation(() => {});
+    jest.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -274,10 +279,90 @@ describe("launchRunner", () => {
   });
 
   it("passes non-capacity errors through", async () => {
-    const err = Object.assign(new Error("denied"), { name: "UnauthorizedOperation" });
-    runInstances.mockRejectedValue(err);
+    const denied = err("UnauthorizedOperation");
+    runInstances.mockRejectedValue(denied);
 
-    await expect(launchRunner(request("spot"))).rejects.toBe(err);
+    await expect(launchRunner(request("spot"))).rejects.toBe(denied);
+    expect(subnetsTried()).toEqual(["subnet-a"]);
     expect(deleteCalls()).toHaveLength(0);
+  });
+
+  it("tries the next subnet after a zonal refusal and returns that instance", async () => {
+    runInstances.mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
+      .mockResolvedValueOnce({ Instances: [{ InstanceId: "i-b" }] });
+    await expect(launchRunner(request("on-demand"))).resolves.toBe("i-b");
+    expect(subnetsTried()).toEqual(["subnet-a", "subnet-b"]);
+  });
+
+  it("moves on from Unsupported", async () => {
+    runInstances.mockRejectedValueOnce(err("Unsupported"))
+      .mockResolvedValueOnce({ Instances: [{ InstanceId: "i-b" }] });
+    await expect(launchRunner(request("spot"))).resolves.toBe("i-b");
+  });
+
+  it("starts at a random subnet and wraps around, trying each once", async () => {
+    jest.mocked(Math.random).mockReturnValue(0.5); // floor(0.5 * 3) = 1
+    runInstances.mockRejectedValue(err("InsufficientInstanceCapacity"));
+    await expect(launchRunner(request("on-demand"))).rejects.toMatchObject({ name: "InsufficientInstanceCapacity" });
+    expect(subnetsTried()).toEqual(["subnet-b", "subnet-c", "subnet-a"]);
+  });
+
+  it("mints the JIT config once across attempts", async () => {
+    runInstances.mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
+      .mockResolvedValueOnce({ Instances: [{ InstanceId: "i-b" }] });
+    await launchRunner(request("on-demand"));
+    expect(fetchMock.mock.calls.filter(([, i]) => i?.method !== "DELETE")).toHaveLength(1);
+  });
+
+  it("stops at MaxSpotInstanceCountExceeded with SpotCapacityError", async () => {
+    runInstances.mockRejectedValue(err("MaxSpotInstanceCountExceeded"));
+    await expect(launchRunner(request("spot"))).rejects.toBeInstanceOf(SpotCapacityError);
+    expect(subnetsTried()).toEqual(["subnet-a"]);
+    expect(deleteCalls()).toHaveLength(1);
+  });
+
+  it("On-Demand stops at a regional error after a zonal refusal", async () => {
+    runInstances.mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
+      .mockRejectedValueOnce(err("VcpuLimitExceeded"));
+    await expect(launchRunner(request("on-demand"))).rejects.toMatchObject({ name: "VcpuLimitExceeded" });
+    expect(subnetsTried()).toHaveLength(2);
+    expect(deleteCalls()).toHaveLength(0);
+  });
+
+  it("Spot stops at a quota wait after a zonal refusal", async () => {
+    runInstances.mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
+      .mockRejectedValueOnce(err("MaxSpotInstanceCountExceeded"));
+    await expect(launchRunner(request("spot"))).rejects.toBeInstanceOf(SpotCapacityError);
+    expect(subnetsTried()).toHaveLength(2);
+    expect(deleteCalls()).toHaveLength(1);
+  });
+
+  it("Spot refused everywhere with a mix of Unsupported and capacity waits", async () => {
+    runInstances.mockRejectedValueOnce(err("Unsupported"))
+      .mockRejectedValueOnce(err("InsufficientInstanceCapacity"))
+      .mockRejectedValueOnce(err("Unsupported"));
+    await expect(launchRunner(request("spot"))).rejects.toBeInstanceOf(SpotCapacityError);
+    expect(deleteCalls()).toHaveLength(1);
+  });
+
+  it("Spot with Unsupported in every zone throws the raw error", async () => {
+    runInstances.mockRejectedValue(err("Unsupported"));
+    await expect(launchRunner(request("spot"))).rejects.toMatchObject({ name: "Unsupported" });
+    expect(subnetsTried()).toHaveLength(3);
+    expect(deleteCalls()).toHaveLength(0);
+  });
+
+  it("On-Demand refused everywhere throws the last refusal", async () => {
+    runInstances.mockRejectedValueOnce(err("Unsupported"))
+      .mockRejectedValueOnce(err("Unsupported"))
+      .mockRejectedValueOnce(err("InsufficientInstanceCapacity"));
+    await expect(launchRunner(request("on-demand"))).rejects.toMatchObject({ name: "InsufficientInstanceCapacity" });
+    expect(deleteCalls()).toHaveLength(0);
+  });
+
+  it("tolerates a single subnet and stray separators in SUBNET_IDS", async () => {
+    process.env.SUBNET_IDS = " subnet-only , ,";
+    await launchRunner(request("on-demand"));
+    expect(subnetsTried()).toEqual(["subnet-only"]);
   });
 });

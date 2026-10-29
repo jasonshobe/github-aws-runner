@@ -8,6 +8,7 @@ import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
 import { deleteRunner, generateJitConfig } from "../webhook/github-client";
 import {
   isSpotCapacityError,
+  isZonalRefusal,
   SpotCapacityError,
   TAG_MARKET,
   type Market,
@@ -220,78 +221,111 @@ export async function launchRunner(req: LaunchRequest): Promise<string> {
   );
   console.log(`Generated JIT config ${req.runnerName} for job ${req.jobId}`);
 
-  let result;
-  try {
-    result = await ec2.send(
-    new RunInstancesCommand({
-      ImageId: await resolveAmiId(),
-      InstanceType: req.instanceType as never,
-      MinCount: 1,
-      MaxCount: 1,
-      SubnetId: process.env.SUBNET_ID!,
-      SecurityGroupIds: [process.env.SECURITY_GROUP_ID!],
-      IamInstanceProfile: { Arn: process.env.INSTANCE_PROFILE_ARN! },
-      UserData: buildUserData(encodedJitConfig, process.env.CACHE_BUCKET_NAME),
-      InstanceInitiatedShutdownBehavior: "terminate",
-      ...(req.market === "spot" && {
-        InstanceMarketOptions: {
-          MarketType: "spot",
-          SpotOptions: {
-            SpotInstanceType: "one-time",
-            InstanceInterruptionBehavior: "terminate",
-          },
+  const subnets = (process.env.SUBNET_IDS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (subnets.length === 0) throw new Error("SUBNET_IDS is empty");
+  const amiId = await resolveAmiId();
+  const input = {
+    ImageId: amiId,
+    InstanceType: req.instanceType as never,
+    MinCount: 1,
+    MaxCount: 1,
+    SecurityGroupIds: [process.env.SECURITY_GROUP_ID!],
+    IamInstanceProfile: { Arn: process.env.INSTANCE_PROFILE_ARN! },
+    UserData: buildUserData(encodedJitConfig, process.env.CACHE_BUCKET_NAME),
+    InstanceInitiatedShutdownBehavior: "terminate" as const,
+    ...(req.market === "spot" && {
+      InstanceMarketOptions: {
+        MarketType: "spot" as const,
+        SpotOptions: {
+          SpotInstanceType: "one-time" as const,
+          InstanceInterruptionBehavior: "terminate" as const,
         },
-      }),
-      BlockDeviceMappings: [
-        {
-          DeviceName: "/dev/sda1",
-          Ebs: {
-            VolumeSize: req.ebsSizeGb,
-            VolumeType: "gp3",
-            DeleteOnTermination: true,
-          },
+      },
+    }),
+    BlockDeviceMappings: [
+      {
+        DeviceName: "/dev/sda1",
+        Ebs: {
+          VolumeSize: req.ebsSizeGb,
+          VolumeType: "gp3" as const,
+          DeleteOnTermination: true,
         },
-      ],
-      TagSpecifications: [
-        {
-          ResourceType: ResourceType.instance,
-          Tags: [
-            { Key: "Name", Value: `github-runner-${req.jobId}` },
-            { Key: TAG_MANAGED, Value: "true" },
-            { Key: TAG_LAUNCH_TIME, Value: new Date().toISOString() },
-            { Key: TAG_JOB_ID, Value: req.jobId },
-            { Key: TAG_TIMEOUT_MINUTES, Value: String(req.timeoutMinutes) },
-            { Key: TAG_RUNNER_NAME, Value: req.runnerName },
-            { Key: TAG_MARKET, Value: req.market },
-          ],
-        },
-      ],
-    })
-    );
-  } catch (err) {
-    if (req.market === "spot" && isSpotCapacityError(err)) {
-      // The JIT runner was minted but will never get an instance. Remove it so
-      // it doesn't linger as an offline registration; the reconciler's prune
-      // would catch it eventually, so a failure here is only logged.
-      try {
-        await deleteRunner(
-          req.targetType,
-          req.targetSlug,
-          runnerId,
-          req.githubToken
-        );
-      } catch (deleteErr) {
-        console.error(
-          `Failed to delete runner ${req.runnerName} after Spot refusal:`,
-          deleteErr
-        );
-      }
-      throw new SpotCapacityError(
-        `Spot capacity unavailable for ${req.instanceType} (runner ${req.runnerName})`,
-        err
+      },
+    ],
+    TagSpecifications: [
+      {
+        ResourceType: ResourceType.instance,
+        Tags: [
+          { Key: "Name", Value: `github-runner-${req.jobId}` },
+          { Key: TAG_MANAGED, Value: "true" },
+          { Key: TAG_LAUNCH_TIME, Value: new Date().toISOString() },
+          { Key: TAG_JOB_ID, Value: req.jobId },
+          { Key: TAG_TIMEOUT_MINUTES, Value: String(req.timeoutMinutes) },
+          { Key: TAG_RUNNER_NAME, Value: req.runnerName },
+          { Key: TAG_MARKET, Value: req.market },
+        ],
+      },
+    ],
+  };
+
+  // The JIT runner was minted but will never get an instance. Remove it so it
+  // doesn't linger as an offline registration; the reconciler's prune would
+  // catch it eventually, so a failure here is only logged.
+  const abandonSpot = async (cause: unknown): Promise<never> => {
+    try {
+      await deleteRunner(
+        req.targetType,
+        req.targetSlug,
+        runnerId,
+        req.githubToken
+      );
+    } catch (deleteErr) {
+      console.error(
+        `Failed to delete runner ${req.runnerName} after Spot refusal:`,
+        deleteErr
       );
     }
-    throw err;
+    throw new SpotCapacityError(
+      `Spot capacity unavailable for ${req.instanceType} (runner ${req.runnerName})`,
+      cause
+    );
+  };
+
+  // Start at a random subnet so launches spread across zones, then visit each
+  // subnet once in round-robin order.
+  const start = Math.floor(Math.random() * subnets.length);
+  const refusals: unknown[] = [];
+  let result;
+  for (let i = 0; i < subnets.length && !result; i++) {
+    const subnetId = subnets[(start + i) % subnets.length];
+    try {
+      result = await ec2.send(new RunInstancesCommand({ ...input, SubnetId: subnetId }));
+    } catch (err) {
+      if (isZonalRefusal(err)) {
+        const e = err as { name?: string; Code?: string };
+        console.warn(
+          `Subnet ${subnetId} refused launch for ${req.runnerName}: ${e.name ?? e.Code}`
+        );
+        refusals.push(err);
+        continue;
+      }
+      // Account-wide Spot limit (MaxSpotInstanceCountExceeded): no zone helps.
+      if (req.market === "spot" && isSpotCapacityError(err)) {
+        return abandonSpot(err);
+      }
+      throw err;
+    }
+  }
+
+  if (!result) {
+    const last = refusals[refusals.length - 1];
+    if (req.market === "spot" && refusals.some(isSpotCapacityError)) {
+      return abandonSpot(last);
+    }
+    throw last;
   }
 
   const instanceId = result.Instances?.[0]?.InstanceId ?? "unknown";

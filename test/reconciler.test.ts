@@ -171,6 +171,49 @@ describe("reconciler market handling", () => {
     expect(launchRunner).toHaveBeenCalledTimes(1);
   });
 
+  test("a failed launch counts as a top-up", async () => {
+    rows = [row("a", 20, "on-demand")];
+    launchRunner.mockRejectedValueOnce(new Error("boom"));
+    await handler();
+    const updates = sent(UpdateItemCommand);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].input.Key).toEqual({ jobId: { S: "a" } });
+  });
+
+  test("a failed launch on a row deleted mid-pass is silent", async () => {
+    rows = [row("a", 20, "on-demand")];
+    launchRunner.mockRejectedValueOnce(new Error("boom"));
+    dynamoSend.mockImplementation(((cmd: unknown) =>
+      cmd instanceof UpdateItemCommand
+        ? Promise.reject(Object.assign(new Error("gone"), { name: "ConditionalCheckFailedException" }))
+        : Promise.resolve({ Items: rows })) as never);
+    await handler();
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining("could not record the top-up count"), expect.anything());
+    expect(sent(UpdateItemCommand)).toHaveLength(1);
+  });
+
+  test("a launch refused for account quota waits without spending a top-up", async () => {
+    rows = [row("a", 20, "on-demand")];
+    launchRunner.mockRejectedValueOnce(Object.assign(new Error("vcpu"), { name: "VcpuLimitExceeded" }));
+    await expect(handler()).resolves.toBeUndefined();
+    expect(sent(UpdateItemCommand)).toHaveLength(0);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("waiting for quota"));
+  });
+
+  test("a failing top-up record after a failed launch is logged and the pass continues", async () => {
+    rows = [row("a", 20, "on-demand"), row("b", 10, "on-demand")];
+    launchRunner.mockRejectedValue(new Error("boom"));
+    dynamoSend.mockImplementation(((cmd: unknown) =>
+      cmd instanceof UpdateItemCommand
+        ? Promise.reject(new Error("throttled"))
+        : Promise.resolve({ Items: rows })) as never);
+    await handler();
+    expect(launchRunner).toHaveBeenCalledTimes(2);
+    expect(console.error).toHaveBeenCalledWith(
+      "Reconciler: could not record the top-up count for job a", expect.any(Error));
+  });
+
   test("a refused Spot launch with nothing in overflow just moves on", async () => {
     params["/t/max"] = "5";
     rows = [row("s", 10, "spot")];

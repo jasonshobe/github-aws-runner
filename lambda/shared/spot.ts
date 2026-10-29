@@ -25,6 +25,25 @@ const CAPACITY_ERROR_CODES = new Set([
   "UnfulfillableCapacity",
 ]);
 
+// Refusals specific to one Availability Zone: another subnet may still succeed.
+const ZONAL_REFUSAL_CODES = new Set([
+  "InsufficientInstanceCapacity",
+  "UnfulfillableCapacity",
+  "SpotMaxPriceTooLow",
+  "Unsupported",
+]);
+
+const LAUNCH_QUOTA_CODES = new Set(["VcpuLimitExceeded", "InstanceLimitExceeded"]);
+
+function hasErrorCode(err: unknown, codes: Set<string>): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { name?: unknown; Code?: unknown };
+  return (
+    (typeof e.name === "string" && codes.has(e.name)) ||
+    (typeof e.Code === "string" && codes.has(e.Code))
+  );
+}
+
 function parseBool(
   raw: string | undefined,
   name: string,
@@ -122,12 +141,17 @@ export function parseMarket(raw: string | undefined): Market {
 }
 
 export function isSpotCapacityError(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as { name?: unknown; Code?: unknown };
-  return (
-    (typeof e.name === "string" && CAPACITY_ERROR_CODES.has(e.name)) ||
-    (typeof e.Code === "string" && CAPACITY_ERROR_CODES.has(e.Code))
-  );
+  return hasErrorCode(err, CAPACITY_ERROR_CODES);
+}
+
+/** A launch refused by one zone; the launcher tries the next subnet. */
+export function isZonalRefusal(err: unknown): boolean {
+  return hasErrorCode(err, ZONAL_REFUSAL_CODES);
+}
+
+/** An account-level launch quota refusal; waiting for quota is the only fix. */
+export function isLaunchQuotaError(err: unknown): boolean {
+  return hasErrorCode(err, LAUNCH_QUOTA_CODES);
 }
 
 /** A Spot launch refused for capacity or quota reasons; retry later. */
