@@ -1,5 +1,6 @@
 import {
   isSpotCapacityError,
+  isZonalRefusal,
   parseMarket,
   parseSpotSettings,
   recheckMarket,
@@ -120,5 +121,29 @@ describe("SpotCapacityError", () => {
     expect(err.message).toBe("no capacity");
     expect(err.cause).toBe(cause);
     expect(TAG_MARKET).toBe("github-aws-runner:market");
+  });
+});
+
+describe("isZonalRefusal", () => {
+  const codes = [
+    "InsufficientInstanceCapacity",
+    "UnfulfillableCapacity",
+    "SpotMaxPriceTooLow",
+    "Unsupported",
+  ];
+
+  it("is true for each zonal code, as name or Code", () => {
+    for (const code of codes) {
+      expect(isZonalRefusal({ name: code })).toBe(true);
+      expect(isZonalRefusal({ Code: code })).toBe(true);
+    }
+  });
+
+  it("is false for account-wide and unrelated errors", () => {
+    expect(isZonalRefusal({ name: "MaxSpotInstanceCountExceeded" })).toBe(false);
+    expect(isZonalRefusal({ name: "VcpuLimitExceeded" })).toBe(false);
+    expect(isZonalRefusal({ name: "UnauthorizedOperation" })).toBe(false);
+    expect(isZonalRefusal(null)).toBe(false);
+    expect(isZonalRefusal(new Error("x"))).toBe(false);
   });
 });
