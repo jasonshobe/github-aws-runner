@@ -93,6 +93,8 @@ These parameters do not need to exist in SSM unless you want to override the doc
 | `/github-aws-runner/reconciler-grace-seconds` | String | How long a job may sit queued before the reconciler launches extra capacity for it (default: `180`) |
 | `/github-aws-runner/reconciler-boot-grace-seconds` | String | How long an instance may run before its runner must be `online` with GitHub for it to still count as capacity (default: `300`) |
 | `/github-aws-runner/reconciler-max-top-ups` | String | Maximum replacement runners the reconciler will launch for a single job (default: `3`) |
+| `/github-aws-runner/spot-enabled` | String | Whether jobs may run on Spot instances (default: `true`); `false` forbids Spot. See [Spot Instances](#spot-instances) |
+| `/github-aws-runner/spot-required` | String | Whether every job must run on Spot (default: `false`); ignored when `spot-enabled` is `false`. See [Spot Instances](#spot-instances) |
 | `/github-aws-runner/ami-name` | String | AMI name pattern (default: `runs-on-v2.*-ubuntu22-full-x64-*`) |
 | `/github-aws-runner/ami-owners` | String | Comma-separated AMI owner account IDs (default: `135269210855`) |
 | `/github-aws-runner/cache-bucket` | String | Name of the S3 bucket to create for runner caching; if set, the bucket is created and managed by the stack |
@@ -273,6 +275,31 @@ jobs:
 
 The runner is provisioned automatically when the job is queued and terminated when it completes.
 
+### Spot Runners
+
+Add a `spot:true` label to run a job on an EC2 Spot instance, which costs less than On-Demand. Add `spot:false` to guarantee a job runs On-Demand:
+
+```yaml
+jobs:
+  quick-test:
+    # Short, cost-sensitive job: run on Spot
+    runs-on: [self-hosted, spot:true]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+
+  release:
+    # Long or must-not-be-interrupted job: never on Spot
+    runs-on: [self-hosted, spot:false]
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./release.sh
+```
+
+Spot is meant for short, cost-sensitive jobs (roughly 30 minutes or less). AWS can reclaim a Spot instance at any time; when that happens mid-job, GitHub marks the job failed and it stays failed until someone re-runs it by hand. There is no automatic re-run. Jobs that are long, or that cannot tolerate an interruption, should stay On-Demand.
+
+GitHub gives a job to any online runner whose labels include all of the job's `runs-on` labels, and a runner may carry extra labels. A Spot runner registers with `self-hosted`, `linux`, `x64` plus its job's labels, including `spot:true`. So a Spot runner launched for a `[self-hosted, spot:true]` job can be handed an older `[self-hosted]` job that happens to be queued at the same time, and that job then runs at interruption risk. The same thing already happens with `instance-type:` runners, where it only costs money. Putting `spot:false` on a job prevents it: no Spot runner ever carries `spot:false`, so GitHub can never match that job to one. The reverse cannot happen, because an On-Demand runner never carries `spot:true`. This only arises when `spot-required` is off and jobs with overlapping labels are queued at once.
+
 ### Caching
 
 Because each runner is a fresh EC2 instance, `actions/cache` will not have access to GitHub's hosted cache. Replace it with [`runs-on/cache`](https://github.com/marketplace/actions/fast-actions-cache-for-s3), which stores cache entries in an S3 bucket. It is a drop-in replacement that accepts the same inputs as `actions/cache`.
@@ -309,7 +336,7 @@ Most SSM parameters take effect immediately without redeploying the stack. The f
 
 ### Runner Capacity Reconciliation
 
-Every runner this stack creates is registered with the same labels (`self-hosted`, `linux`, `x64`), so GitHub treats them as interchangeable. When a runner comes online GitHub gives it the **oldest** matching queued job in your org or repo — not necessarily the job whose webhook launched it. The `aws-runner-<job id>` name is only a label for humans.
+Every runner this stack creates is registered with `self-hosted`, `linux`, `x64` plus the labels of the job that triggered it, and GitHub hands a job to any online runner whose labels include all of the job's `runs-on` labels. In practice the runners are interchangeable: when a runner comes online GitHub gives it the **oldest** matching queued job in your org or repo — not necessarily the job whose webhook launched it. The `aws-runner-<job id>` name is only a label for humans.
 
 That means launching one instance per `workflow_job.queued` webhook is not enough on its own. If an instance ever fails to bring its runner online, or is reaped while idle, the queue is left permanently one runner short: from then on each new runner picks up an older backlog job and the newest job sits in `queued` until someone cancels it. Busy repositories hide this as "jobs are just slow to start"; a repository that queues jobs infrequently sees them never start at all.
 
@@ -326,6 +353,58 @@ aws logs tail /aws/lambda/<stack>-ReconcilerFn<suffix> --follow
 ```
 
 A healthy idle log line reads `Reconciler: runner supply covers the backlog, nothing to launch`.
+
+### Spot Instances
+
+Whether a job runs on Spot is decided per job by its `spot:true` / `spot:false` label (see [Spot Runners](#spot-runners)). Two optional SSM parameters let an organization enforce a policy. Both accept `true` or `false` (case-insensitive); a missing parameter uses the default, and an unparseable value logs a warning and uses the default.
+
+| Policy | `spot-enabled` | `spot-required` |
+|---|---|---|
+| Per-job choice (the default) | `true` | `false` |
+| Every runner must be Spot | `true` | `true` |
+| Spot is forbidden | `false` | (ignored) |
+
+```bash
+# Require Spot for every job
+aws ssm put-parameter \
+  --name /github-aws-runner/spot-required \
+  --type String \
+  --value "true"
+
+# Or forbid Spot entirely
+aws ssm put-parameter \
+  --name /github-aws-runner/spot-enabled \
+  --type String \
+  --value "false"
+```
+
+If `spot-enabled` is `false` and `spot-required` is `true`, disabled wins and a warning is logged. Label matching is case-insensitive, so `spot:TRUE` works. Any other `spot:` value logs a warning and is treated as if the label were absent.
+
+What happens to a job, as decided by the webhook when it is queued:
+
+| `spot-enabled` | `spot-required` | Job label | Result |
+|---|---|---|---|
+| true | false | none | On-Demand |
+| true | false | `spot:true` | Spot |
+| true | false | `spot:false` | On-Demand |
+| true | true | none | Spot |
+| true | true | `spot:true` | Spot |
+| true | true | `spot:false` | Not launched |
+| false | any | none | On-Demand |
+| false | any | `spot:false` | On-Demand |
+| false | any | `spot:true` | Not launched |
+
+A job carrying both `spot:true` and `spot:false` is also not launched. **Not launched** means the webhook logs a message naming the job and the conflict, records nothing in the queued-jobs table, and returns 200, so the reconciler never retries it. The job stays `queued` on GitHub until GitHub drops it, the same as a job missing the configured `runner-label`.
+
+**No On-Demand fallback.** A job that asks for Spot, or runs where Spot is required, only ever runs on Spot. If AWS refuses a Spot launch for capacity or quota reasons (`InsufficientInstanceCapacity`, `MaxSpotInstanceCountExceeded`, `SpotMaxPriceTooLow` or `UnfulfillableCapacity`), the job waits: the webhook logs a warning and returns 200, and the reconciler retries on every run until Spot capacity returns, the job starts or is dropped by GitHub, or its row expires. Nothing is silently launched On-Demand. The runner registration minted for the refused launch is deleted straight away. A refused Spot launch uses no capacity, so it does not take a slot under `max-concurrent-runners` for that reconciler run and does not stall other jobs queued behind it. It also does not count toward `reconciler-max-top-ups`. A Spot instance that is reclaimed before its runner takes a job does count, because it was a successful launch.
+
+The reconciler re-checks policy before every top-up using the market stored on the job's row. If the settings have changed so the stored choice now conflicts (a Spot job after Spot is disabled, or an On-Demand job after Spot becomes required), it logs the reason, does not launch, and deletes the row. It never converts a job from one market to the other. Rows written before Spot support carry no market and are treated as On-Demand.
+
+Spot launches are one-time requests with no maximum price, so AWS caps the price at the On-Demand price. Instance type, disk and timeout labels work as usual, and `allowed-instance-types` applies to Spot too. Spot instances count toward `max-concurrent-runners`, and each instance is tagged `github-aws-runner:market` as `spot` or `on-demand`.
+
+Both parameters are read at runtime, so no redeploy is needed. The webhook caches parameters on each warm Lambda instance, as it does every other runtime parameter, so a change takes effect as each Lambda picks it up. The stack grants the launching Lambdas permission to create the EC2 Spot service-linked role, so the first Spot launch in a fresh account works without manual setup.
+
+**Upgrade note:** a workflow that already uses a custom runner label spelled `spot:true` or `spot:false` gains the meaning described here.
 
 ### Runner Timeout
 
@@ -638,6 +717,10 @@ Cost Anomaly Detection identifies unusual spending patterns beyond simple thresh
 1. Open the [Cost Anomaly Detection console](https://console.aws.amazon.com/cost-management/home#/anomaly-detection).
 2. Create a monitor scoped to the **EC2** service (the primary cost driver for this project).
 3. Create an alert subscription with your preferred notification method.
+
+### Spot Instances
+
+Spot never falls back to On-Demand, so a Spot shortage cannot raise your bill unexpectedly: jobs wait for Spot capacity instead. Check your account's Spot vCPU quota in Service Quotas ("All Standard Spot Instance Requests"). A low quota is reported by AWS as `MaxSpotInstanceCountExceeded`, which looks the same as a permanent capacity shortage, and Spot jobs will wait indefinitely until you raise it.
 
 ## Teardown
 
