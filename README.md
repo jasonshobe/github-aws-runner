@@ -354,6 +354,12 @@ aws logs tail /aws/lambda/<stack>-ReconcilerFn<suffix> --follow
 
 A healthy idle log line reads `Reconciler: runner supply covers the backlog, nothing to launch`.
 
+### Availability Zones
+
+The stack has a public runner subnet in every standard Availability Zone of the region (Local Zones and Wavelength Zones are excluded). Every launch, On-Demand or Spot, starts at a random zone's subnet and tries each zone's subnet once, in round-robin order, until one accepts. A zonal refusal (`InsufficientInstanceCapacity`, `UnfulfillableCapacity`, `SpotMaxPriceTooLow` or `Unsupported`) moves on to the next zone. Any other error stops the attempt at once. When every zone refuses an On-Demand launch, the last refusal is raised as the launch failure and counts toward `reconciler-max-top-ups`. Spot behaves differently when zones refuse; see [Spot Instances](#spot-instances).
+
+**Upgrade and cost note:** the original subnet keeps the VPC's `10.0.0.0/16` range. A redeploy adds a `10.1.0.0/16` secondary CIDR to the VPC and one `/21` public subnet per extra standard Availability Zone. Existing resources are unchanged and running instances are unaffected, so no drain is needed. `10.1.0.0/16` must not overlap any network the VPC is peered or routed to. The extra subnets cost nothing, provided you do not put anything zonal (a NAT gateway or an interface endpoint) in the runner path.
+
 ### Spot Instances
 
 Whether a job runs on Spot is decided per job by its `spot:true` / `spot:false` label (see [Spot Runners](#spot-runners)). Two optional SSM parameters let an organization enforce a policy. Both accept `true` or `false` (case-insensitive); a missing parameter uses the default, and an unparseable value logs a warning and uses the default.
@@ -380,6 +386,8 @@ aws ssm put-parameter \
 
 If `spot-enabled` is `false` and `spot-required` is `true`, disabled wins and a warning is logged. Label matching is case-insensitive, so `spot:TRUE` works. Any other `spot:` value logs a warning and is treated as if the label were absent.
 
+Both parameters are read at runtime, so no redeploy is needed. The webhook caches parameters on each warm Lambda instance, as it does every other runtime parameter, so a change takes effect as each Lambda picks it up. The stack grants the launching Lambdas permission to create the EC2 Spot service-linked role, so the first Spot launch in a fresh account works without manual setup.
+
 What happens to a job, as decided by the webhook when it is queued:
 
 | `spot-enabled` | `spot-required` | Job label | Result |
@@ -402,11 +410,7 @@ The reconciler re-checks policy before every top-up using the market stored on t
 
 Spot launches are one-time requests with no maximum price, so AWS caps the price at the On-Demand price. Instance type, disk and timeout labels work as usual, and `allowed-instance-types` applies to Spot too. Spot instances count toward `max-concurrent-runners`, and each instance is tagged `github-aws-runner:market` as `spot` or `on-demand`.
 
-**Multiple Availability Zones.** The stack has a public runner subnet in every standard Availability Zone of the region (Local Zones and Wavelength Zones are excluded). AWS manages Spot capacity per instance type *per zone*, so each launch starts at a random zone's subnet and tries every zone in turn until one accepts. A zonal refusal (`InsufficientInstanceCapacity`, `UnfulfillableCapacity`, `SpotMaxPriceTooLow` or `Unsupported`) moves on to the next zone. `MaxSpotInstanceCountExceeded` is an account-wide quota, so it, and any other error, stops the attempt immediately. Only when every zone refuses a Spot launch, with at least one refusal being a capacity code, does the job wait as described above. When jobs still often wait for Spot capacity, try listing several comparable types in `allowed-instance-types` and spreading Spot workflows across them.
-
-**Network upgrade note:** the original subnet keeps the VPC's `10.0.0.0/16` range. A redeploy adds a `10.1.0.0/16` secondary CIDR to the VPC and one `/21` public subnet per extra standard Availability Zone. Existing resources are unchanged and running instances are unaffected, so no drain is needed. `10.1.0.0/16` must not overlap any network the VPC is peered or routed to. The extra subnets cost nothing, provided you do not put anything zonal (a NAT gateway or an interface endpoint) in the runner path.
-
-Both parameters are read at runtime, so no redeploy is needed. The webhook caches parameters on each warm Lambda instance, as it does every other runtime parameter, so a change takes effect as each Lambda picks it up. The stack grants the launching Lambdas permission to create the EC2 Spot service-linked role, so the first Spot launch in a fresh account works without manual setup.
+**Availability Zones and Spot.** Each Spot launch goes through the zone loop described in [Availability Zones](#availability-zones). Because AWS manages Spot capacity per instance type *per zone*, the job waits only when every zone refused and at least one refusal was a capacity code. `MaxSpotInstanceCountExceeded` is an account-wide quota, so it makes the job wait immediately without trying other zones. If every zone answered `Unsupported`, the launch fails like any other error instead of waiting. When jobs still often wait for Spot capacity, try listing several comparable types in `allowed-instance-types` and spreading Spot workflows across them.
 
 **Upgrade note:** a workflow that already uses a custom runner label spelled `spot:true` or `spot:false` gains the meaning described here.
 
