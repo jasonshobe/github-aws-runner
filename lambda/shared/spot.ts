@@ -33,6 +33,8 @@ const ZONAL_REFUSAL_CODES = new Set([
   "Unsupported",
 ]);
 
+const LAUNCH_QUOTA_CODES = new Set(["VcpuLimitExceeded", "InstanceLimitExceeded"]);
+
 function hasErrorCode(err: unknown, codes: Set<string>): boolean {
   if (typeof err !== "object" || err === null) return false;
   const e = err as { name?: unknown; Code?: unknown };
@@ -145,6 +147,11 @@ export function isSpotCapacityError(err: unknown): boolean {
 /** A launch refused by one zone; the launcher tries the next subnet. */
 export function isZonalRefusal(err: unknown): boolean {
   return hasErrorCode(err, ZONAL_REFUSAL_CODES);
+}
+
+/** An account-level launch quota refusal; waiting for quota is the only fix. */
+export function isLaunchQuotaError(err: unknown): boolean {
+  return hasErrorCode(err, LAUNCH_QUOTA_CODES);
 }
 
 /** A Spot launch refused for capacity or quota reasons; retry later. */

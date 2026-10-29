@@ -1,4 +1,5 @@
 import {
+  isLaunchQuotaError,
   isSpotCapacityError,
   isZonalRefusal,
   parseMarket,
@@ -145,5 +146,22 @@ describe("isZonalRefusal", () => {
     expect(isZonalRefusal({ name: "UnauthorizedOperation" })).toBe(false);
     expect(isZonalRefusal(null)).toBe(false);
     expect(isZonalRefusal(new Error("x"))).toBe(false);
+  });
+});
+
+describe("isLaunchQuotaError", () => {
+  it("is true for each account quota code, as name or Code", () => {
+    for (const code of ["VcpuLimitExceeded", "InstanceLimitExceeded"]) {
+      expect(isLaunchQuotaError({ name: code })).toBe(true);
+      expect(isLaunchQuotaError({ Code: code })).toBe(true);
+    }
+  });
+
+  it("is false for capacity, throttling and unrelated errors", () => {
+    expect(isLaunchQuotaError({ name: "MaxSpotInstanceCountExceeded" })).toBe(false);
+    expect(isLaunchQuotaError({ name: "InsufficientInstanceCapacity" })).toBe(false);
+    expect(isLaunchQuotaError({ name: "RequestLimitExceeded" })).toBe(false);
+    expect(isLaunchQuotaError(null)).toBe(false);
+    expect(isLaunchQuotaError(new Error("x"))).toBe(false);
   });
 });

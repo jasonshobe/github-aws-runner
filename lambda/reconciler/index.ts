@@ -18,6 +18,7 @@ import {
 import {
   parseMarket,
   parseSpotSettings,
+  isLaunchQuotaError,
   recheckMarket,
   SpotCapacityError,
 } from "../shared/spot";
@@ -339,6 +340,14 @@ export async function handler(): Promise<void> {
       }
       // One failed top-up must not stop the rest of the backlog being covered.
       console.error(`Reconciler: failed to launch a runner for job ${job.jobId}`, err);
+      // An account quota is a wait, like Spot capacity: it clears on its own,
+      // so it must not spend the job's top-up budget.
+      if (isLaunchQuotaError(err)) {
+        console.warn(
+          `Reconciler: job ${job.jobId} is waiting for quota; will retry next run`
+        );
+        continue;
+      }
       // A launch that fails every pass would otherwise be retried until the
       // row's TTL, so it spends the job's top-up budget like a dead runner does.
       await recordTopUp(job.jobId);

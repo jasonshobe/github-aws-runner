@@ -190,6 +190,15 @@ describe("reconciler market handling", () => {
     await handler();
     expect(console.error).not.toHaveBeenCalledWith(
       expect.stringContaining("could not record the top-up count"), expect.anything());
+    expect(sent(UpdateItemCommand)).toHaveLength(1);
+  });
+
+  test("a launch refused for account quota waits without spending a top-up", async () => {
+    rows = [row("a", 20, "on-demand")];
+    launchRunner.mockRejectedValueOnce(Object.assign(new Error("vcpu"), { name: "VcpuLimitExceeded" }));
+    await expect(handler()).resolves.toBeUndefined();
+    expect(sent(UpdateItemCommand)).toHaveLength(0);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("waiting for quota"));
   });
 
   test("a failing top-up record after a failed launch is logged and the pass continues", async () => {
