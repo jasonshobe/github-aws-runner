@@ -42,6 +42,7 @@ describe("webhook market selection", () => {
   let log: jest.SpyInstance;
   let PutItemCommand: typeof import("@aws-sdk/client-dynamodb").PutItemCommand;
   let spotParams: Record<string, string>;
+  let ssmSend: jest.SpyInstance;
 
   beforeEach(() => {
     process.env = { ...originalEnv, ...PARAM_ENVS, AWS_REGION: "us-east-1" };
@@ -57,7 +58,7 @@ describe("webhook market selection", () => {
     const { EC2Client } = require("@aws-sdk/client-ec2");
     PutItemCommand = require("@aws-sdk/client-dynamodb").PutItemCommand;
     SpotCapacityError = require("../lambda/shared/spot").SpotCapacityError;
-    jest.spyOn(SSMClient.prototype, "send").mockImplementation(((cmd: unknown) => {
+    ssmSend = jest.spyOn(SSMClient.prototype, "send").mockImplementation(((cmd: any) => {
       if (cmd instanceof GetParameterCommand) {
         return Promise.resolve({ Parameter: { Value: SECRET } });
       }
@@ -71,8 +72,12 @@ describe("webhook market selection", () => {
         "/t/timeout": "60",
         ...spotParams,
       };
+      // Like AWS, only return what was asked for.
+      const requested: string[] = cmd.input.Names ?? [];
       return Promise.resolve({
-        Parameters: Object.entries(values).map(([Name, Value]) => ({ Name, Value })),
+        Parameters: Object.entries(values)
+          .filter(([Name]) => requested.includes(Name))
+          .map(([Name, Value]) => ({ Name, Value })),
       });
     }) as never);
     dynamoSend = jest.spyOn(DynamoDBClient.prototype, "send").mockResolvedValue({} as never);
@@ -93,6 +98,16 @@ describe("webhook market selection", () => {
       .map((c) => c[0])
       .filter((c) => c instanceof PutItemCommand);
   const storedMarket = () => puts()[0].input.Item?.market;
+
+  test("never asks SSM for more than 10 parameter names per request", async () => {
+    const { GetParametersCommand } = require("@aws-sdk/client-ssm");
+    await handler(event(["self-hosted"]));
+    const getParams = ssmSend.mock.calls
+      .map((c) => c[0])
+      .filter((c) => c instanceof GetParametersCommand);
+    expect(getParams.length).toBeGreaterThan(0);
+    for (const c of getParams) expect(c.input.Names.length).toBeLessThanOrEqual(10);
+  });
 
   test("keeps today's behavior with no spot parameters or labels", async () => {
     const res = await handler(event(["self-hosted"]));

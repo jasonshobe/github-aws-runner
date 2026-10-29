@@ -5,7 +5,8 @@ import {
   DeleteItemCommand,
   UpdateItemCommand,
 } from "@aws-sdk/client-dynamodb";
-import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
+import { SSMClient } from "@aws-sdk/client-ssm";
+import { getParametersByName } from "../shared/ssm";
 import { deleteRunner, getJobStatus, listRunners } from "../webhook/github-client";
 import {
   buildRunnerName,
@@ -41,31 +42,20 @@ const DEFAULT_BOOT_GRACE_SECONDS = 300;
 const DEFAULT_MAX_TOP_UPS = 3;
 
 async function getParams() {
-  const result = await ssm.send(
-    new GetParametersCommand({
-      Names: [
-        process.env.GITHUB_TOKEN_PARAM!,
-        process.env.TARGET_TYPE_PARAM!,
-        process.env.TARGET_SLUG_PARAM!,
-        process.env.INSTANCE_TYPE_PARAM!,
-        process.env.EBS_VOLUME_SIZE_PARAM!,
-        process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
-        process.env.RUNNER_TIMEOUT_PARAM!,
-        process.env.RECONCILER_GRACE_SECONDS_PARAM!,
-        process.env.RECONCILER_BOOT_GRACE_SECONDS_PARAM!,
-        process.env.RECONCILER_MAX_TOP_UPS_PARAM!,
-        process.env.SPOT_ENABLED_PARAM!,
-        process.env.SPOT_REQUIRED_PARAM!,
-      ],
-      WithDecryption: true,
-    })
-  );
-  const byName = Object.fromEntries(
-    (result.Parameters ?? []).map((p: { Name?: string; Value?: string }) => [
-      p.Name!,
-      p.Value!,
-    ])
-  );
+  const byName = await getParametersByName(ssm, [
+    process.env.GITHUB_TOKEN_PARAM!,
+    process.env.TARGET_TYPE_PARAM!,
+    process.env.TARGET_SLUG_PARAM!,
+    process.env.INSTANCE_TYPE_PARAM!,
+    process.env.EBS_VOLUME_SIZE_PARAM!,
+    process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
+    process.env.RUNNER_TIMEOUT_PARAM!,
+    process.env.RECONCILER_GRACE_SECONDS_PARAM!,
+    process.env.RECONCILER_BOOT_GRACE_SECONDS_PARAM!,
+    process.env.RECONCILER_MAX_TOP_UPS_PARAM!,
+    process.env.SPOT_ENABLED_PARAM!,
+    process.env.SPOT_REQUIRED_PARAM!,
+  ]);
   const graceRaw = parseInt(
     byName[process.env.RECONCILER_GRACE_SECONDS_PARAM!],
     10
@@ -223,12 +213,26 @@ export async function handler(): Promise<void> {
   // A refused Spot launch consumes no capacity, so it hands its slot to the
   // next uncovered job rather than leaving it idle until the next run.
   const queue = [...launchFor];
+  // Instance types AWS has refused Spot capacity for during this pass. Spot
+  // capacity is per type, so retrying the rest of the backlog of that type would
+  // only spend a status GET, a JIT mint, a failed RunInstances and a runner
+  // DELETE per job to hear the same answer.
+  const spotRefusedTypes = new Set<string>();
   const refill = () => {
     const next = overflow.shift();
     if (next) queue.push(next);
   };
 
   for (let job = queue.shift(); job; job = queue.shift()) {
+    const instanceType = job.instanceType ?? params.instanceType;
+    if ((job.market ?? "on-demand") === "spot" && spotRefusedTypes.has(instanceType)) {
+      console.log(
+        `Reconciler: job ${job.jobId} skipped — Spot capacity for ${instanceType} was refused earlier in this run; will retry next run`
+      );
+      refill();
+      continue;
+    }
+
     const waitedSeconds = Math.round((now - Date.parse(job.queuedAt)) / 1000);
 
     // Confirm the job is genuinely still waiting. A row whose `in_progress` or
@@ -286,7 +290,7 @@ export async function handler(): Promise<void> {
         jobId: job.jobId,
         runnerName: buildRunnerName(job.jobId, `${suffix}${attempts++}`),
         labels: job.labels ?? ["self-hosted"],
-        instanceType: job.instanceType ?? params.instanceType,
+        instanceType,
         ebsSizeGb: job.ebsSizeGb ?? params.ebsVolumeSizeGb,
         timeoutMinutes: job.timeoutMinutes ?? params.runnerTimeoutMinutes,
         targetType: params.targetType,
@@ -297,6 +301,7 @@ export async function handler(): Promise<void> {
       launched++;
     } catch (err) {
       if (err instanceof SpotCapacityError) {
+        spotRefusedTypes.add(instanceType);
         console.warn(
           `Reconciler: job ${job.jobId} is waiting for Spot capacity (${err.message}); will retry next run`
         );

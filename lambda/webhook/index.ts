@@ -8,9 +8,9 @@ import {
 import {
   SSMClient,
   GetParameterCommand,
-  GetParametersCommand,
 } from "@aws-sdk/client-ssm";
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+import { getParametersByName } from "../shared/ssm";
 import { buildRunnerName, launchRunner, TAG_MANAGED } from "../shared/launcher";
 import {
   parseSpotSettings,
@@ -62,31 +62,20 @@ async function getWebhookSecret(): Promise<string> {
 
 async function getParams(): Promise<NonNullable<typeof cachedParams>> {
   if (cachedParams) return cachedParams;
-  const result = await ssm.send(
-    new GetParametersCommand({
-      Names: [
-        process.env.GITHUB_TOKEN_PARAM!,
-        process.env.TARGET_TYPE_PARAM!,
-        process.env.TARGET_SLUG_PARAM!,
-        process.env.INSTANCE_TYPE_PARAM!,
-        process.env.EBS_VOLUME_SIZE_PARAM!,
-        process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
-        process.env.RUNNER_TIMEOUT_PARAM!,
-        process.env.RUNNER_LABEL_PARAM!,
-        process.env.ALLOWED_INSTANCE_TYPES_PARAM!,
-        process.env.MAX_EBS_VOLUME_SIZE_PARAM!,
-        process.env.SPOT_ENABLED_PARAM!,
-        process.env.SPOT_REQUIRED_PARAM!,
-      ],
-      WithDecryption: true,
-    })
-  );
-  const byName = Object.fromEntries(
-    (result.Parameters ?? []).map((p: { Name?: string; Value?: string }) => [
-      p.Name!,
-      p.Value!,
-    ])
-  );
+  const byName = await getParametersByName(ssm, [
+    process.env.GITHUB_TOKEN_PARAM!,
+    process.env.TARGET_TYPE_PARAM!,
+    process.env.TARGET_SLUG_PARAM!,
+    process.env.INSTANCE_TYPE_PARAM!,
+    process.env.EBS_VOLUME_SIZE_PARAM!,
+    process.env.MAX_CONCURRENT_RUNNERS_PARAM!,
+    process.env.RUNNER_TIMEOUT_PARAM!,
+    process.env.RUNNER_LABEL_PARAM!,
+    process.env.ALLOWED_INSTANCE_TYPES_PARAM!,
+    process.env.MAX_EBS_VOLUME_SIZE_PARAM!,
+    process.env.SPOT_ENABLED_PARAM!,
+    process.env.SPOT_REQUIRED_PARAM!,
+  ]);
   const allowedRaw = byName[process.env.ALLOWED_INSTANCE_TYPES_PARAM!];
   const maxEbsRaw = byName[process.env.MAX_EBS_VOLUME_SIZE_PARAM!];
   cachedParams = {

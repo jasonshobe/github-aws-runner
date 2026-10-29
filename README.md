@@ -396,7 +396,7 @@ What happens to a job, as decided by the webhook when it is queued:
 
 A job carrying both `spot:true` and `spot:false` is also not launched. **Not launched** means the webhook logs a message naming the job and the conflict, records nothing in the queued-jobs table, and returns 200, so the reconciler never retries it. The job stays `queued` on GitHub until GitHub drops it, the same as a job missing the configured `runner-label`.
 
-**No On-Demand fallback.** A job that asks for Spot, or runs where Spot is required, only ever runs on Spot. If AWS refuses a Spot launch for capacity or quota reasons (`InsufficientInstanceCapacity`, `MaxSpotInstanceCountExceeded`, `SpotMaxPriceTooLow` or `UnfulfillableCapacity`), the job waits: the webhook logs a warning and returns 200, and the reconciler retries on every run until Spot capacity returns, the job starts or is dropped by GitHub, or its row expires. Nothing is silently launched On-Demand. The runner registration minted for the refused launch is deleted straight away. A refused Spot launch uses no capacity, so it does not take a slot under `max-concurrent-runners` for that reconciler run and does not stall other jobs queued behind it. It also does not count toward `reconciler-max-top-ups`. A Spot instance that is reclaimed before its runner takes a job does count, because it was a successful launch.
+**No On-Demand fallback.** A job that asks for Spot, or runs where Spot is required, only ever runs on Spot. If AWS refuses a Spot launch for capacity or quota reasons (`InsufficientInstanceCapacity`, `MaxSpotInstanceCountExceeded`, `SpotMaxPriceTooLow` or `UnfulfillableCapacity`), the job waits: the webhook logs a warning and returns 200, and the reconciler retries on every run until Spot capacity returns, the job starts or is dropped by GitHub, or its queued-jobs row expires (24 hours after the job was queued, `ROW_TTL_SECONDS` in `lambda/webhook/index.ts`) or GitHub drops the job earlier. Nothing is silently launched On-Demand. The runner registration minted for the refused launch is deleted straight away. A refused Spot launch uses no capacity, so it does not take a slot under `max-concurrent-runners` for that reconciler run and does not stall other jobs queued behind it. It also does not count toward `reconciler-max-top-ups`. A Spot instance that is reclaimed before its runner takes a job does count, because it was a successful launch.
 
 The reconciler re-checks policy before every top-up using the market stored on the job's row. If the settings have changed so the stored choice now conflicts (a Spot job after Spot is disabled, or an On-Demand job after Spot becomes required), it logs the reason, does not launch, and deletes the row. It never converts a job from one market to the other. Rows written before Spot support carry no market and are treated as On-Demand.
 
@@ -504,7 +504,7 @@ Changes take effect on the next Lambda cold start — no redeployment required.
 
 No additional configuration is needed for private AMIs shared with your account (unencrypted, or encrypted with an AWS-managed key). The Lambda role already has `ec2:DescribeImages` and `ec2:RunInstances`.
 
-If the AMI's snapshots are encrypted with a **customer-managed KMS key (CMK)**, EC2 requires the launching principal to create a key grant. Add a policy statement to the webhook Lambda's role granting access to the CMK:
+If the AMI's snapshots are encrypted with a **customer-managed KMS key (CMK)**, EC2 requires the launching principal to create a key grant. Add a policy statement to the webhook Lambda's role granting access to the CMK. The Reconciler Lambda also launches instances, so its role needs the same permissions (repeat the command below for its role, whose logical ID contains `ReconcilerFn`):
 
 ```bash
 # Find the role name in the CloudFormation stack resources
@@ -525,6 +525,15 @@ aws iam put-role-policy \
       "Resource": "arn:aws:kms:<region>:<account>:key/<key-id>"
     }]
   }'
+```
+
+For **Spot** runners, the `AWSServiceRoleForEC2Spot` service-linked role also needs a grant on the CMK when the AMI or its EBS snapshots are encrypted with it. Without one the Spot launch fails with an error that is not a capacity error, so it is not retried as one. Create the grant once per key:
+
+```bash
+aws kms create-grant \
+  --key-id <key-id> \
+  --grantee-principal arn:aws:iam::<account>:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot \
+  --operations Decrypt GenerateDataKeyWithoutPlaintext ReEncryptFrom ReEncryptTo CreateGrant DescribeKey
 ```
 
 ### Cache Bucket
@@ -720,7 +729,7 @@ Cost Anomaly Detection identifies unusual spending patterns beyond simple thresh
 
 ### Spot Instances
 
-Spot never falls back to On-Demand, so a Spot shortage cannot raise your bill unexpectedly: jobs wait for Spot capacity instead. Check your account's Spot vCPU quota in Service Quotas ("All Standard Spot Instance Requests"). A low quota is reported by AWS as `MaxSpotInstanceCountExceeded`, which looks the same as a permanent capacity shortage, and Spot jobs will wait indefinitely until you raise it.
+Spot never falls back to On-Demand, so a Spot shortage cannot raise your bill unexpectedly: jobs wait for Spot capacity instead. Check your account's Spot vCPU quota in Service Quotas ("All Standard Spot Instance Requests"). A low quota is reported by AWS as `MaxSpotInstanceCountExceeded`, which looks the same as a permanent capacity shortage, and Spot jobs will wait until you raise it, up to 24 hours after the job was queued (the queued-jobs row expires then, `ROW_TTL_SECONDS` in `lambda/webhook/index.ts`) or until GitHub drops the job.
 
 ## Teardown
 

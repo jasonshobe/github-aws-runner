@@ -27,6 +27,8 @@ function row(jobId: string, ageMinutes: number, market?: string) {
 describe("reconciler market handling", () => {
   const originalEnv = process.env;
   let launchRunner: jest.Mock;
+  let getJobStatus: jest.Mock;
+  let ssmSend: jest.SpyInstance;
   let SpotCapacityError: typeof import("../lambda/shared/spot").SpotCapacityError;
   let dynamoSend: jest.SpyInstance;
   let handler: typeof import("../lambda/reconciler").handler;
@@ -43,9 +45,10 @@ describe("reconciler market handling", () => {
       ...jest.requireActual("../lambda/shared/launcher"),
       launchRunner,
     }));
+    getJobStatus = jest.fn().mockResolvedValue("queued");
     jest.doMock("../lambda/webhook/github-client", () => ({
       listRunners: jest.fn().mockResolvedValue([]),
-      getJobStatus: jest.fn().mockResolvedValue("queued"),
+      getJobStatus,
       deleteRunner: jest.fn().mockResolvedValue(undefined),
     }));
     rows = [];
@@ -56,7 +59,7 @@ describe("reconciler market handling", () => {
     UpdateItemCommand = dynamo.UpdateItemCommand;
     DeleteItemCommand = dynamo.DeleteItemCommand;
     SpotCapacityError = require("../lambda/shared/spot").SpotCapacityError;
-    jest.spyOn(SSMClient.prototype, "send").mockImplementation((() => {
+    ssmSend = jest.spyOn(SSMClient.prototype, "send").mockImplementation(((cmd: any) => {
       const values: Record<string, string> = {
         "/t/github-token": "tok",
         "/t/target-type": "repo",
@@ -67,8 +70,12 @@ describe("reconciler market handling", () => {
         "/t/timeout": "60",
         ...params,
       };
+      // Like AWS, only return what was asked for.
+      const requested: string[] = cmd.input.Names ?? [];
       return Promise.resolve({
-        Parameters: Object.entries(values).map(([Name, Value]) => ({ Name, Value })),
+        Parameters: Object.entries(values)
+          .filter(([Name]) => requested.includes(Name))
+          .map(([Name, Value]) => ({ Name, Value })),
       });
     }) as never);
     dynamoSend = jest
@@ -96,6 +103,38 @@ describe("reconciler market handling", () => {
       .map((c) => c[0])
       .filter((c) => c instanceof (type as new () => object));
   const launchedIds = () => launchRunner.mock.calls.map((c) => c[0].jobId);
+
+  test("never asks SSM for more than 10 parameter names per request", async () => {
+    const { GetParametersCommand } = require("@aws-sdk/client-ssm");
+    rows = [];
+    await handler();
+    const getParams = ssmSend.mock.calls
+      .map((c) => c[0])
+      .filter((c) => c instanceof GetParametersCommand);
+    expect(getParams.length).toBeGreaterThan(0);
+    for (const c of getParams) expect(c.input.Names.length).toBeLessThanOrEqual(10);
+  });
+
+  test("after a Spot refusal, skips the pass's remaining Spot jobs of that type but not others", async () => {
+    params["/t/max"] = "10";
+    rows = [
+      row("s1", 40, "spot"),
+      row("s2", 30, "spot"),
+      row("s3", 20, "spot"),
+      row("od", 10, "on-demand"),
+    ];
+    launchRunner.mockImplementation((p: { jobId: string }) =>
+      p.jobId === "s1"
+        ? Promise.reject(new SpotCapacityError("no capacity", null))
+        : Promise.resolve("i-1")
+    );
+    await handler();
+    expect(launchedIds()).toEqual(["s1", "od"]);
+    const checked = getJobStatus.mock.calls.map((c) => c[1]);
+    expect(checked).toContain("s1");
+    expect(checked).not.toContain("s2");
+    expect(checked).not.toContain("s3");
+  });
 
   test("tops up a row without a market attribute as On-Demand", async () => {
     rows = [row("1", 10)];
